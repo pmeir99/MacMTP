@@ -1,0 +1,26 @@
+name: Build MacMTP
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: macmtp-main
+  cancel-in-progress: true
+jobs:
+  package:
+    runs-on: xcode-27
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build and verify Apple Silicon package
+        run: bash package.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: MacMTP
+          path: dist/MacMTP.dmg
+          if-no-files-found: error
+          compression-level: 0
