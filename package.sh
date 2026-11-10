@@ -51,8 +51,10 @@ plutil -lint "$app/Info.plist"
 codesign --force --sign - "$library"
 codesign --force --sign - "$stage/MacMTP.app"
 codesign --verify --deep --strict "$stage/MacMTP.app"
-ln -s /Applications "$stage/Applications"
-rm -f dist/MacMTP.dmg
-diskutil image create from --format UDZO --volumeName MacMTP "$stage" "$PWD/dist/MacMTP.dmg"
-diskutil image info "$PWD/dist/MacMTP.dmg"
-test -s dist/MacMTP.dmg
+rm -rf dist/MacMTP.app
+ditto "$stage/MacMTP.app" dist/MacMTP.app
+codesign --verify --deep --strict dist/MacMTP.app
+rm -f dist/MacMTP.zip
+ditto -c -k --sequesterRsrc --keepParent dist/MacMTP.app dist/MacMTP.zip
+ditto -x -k dist/MacMTP.zip "$stage/unpacked"
+codesign --verify --deep --strict "$stage/unpacked/MacMTP.app"
