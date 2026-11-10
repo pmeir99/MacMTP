@@ -98,7 +98,17 @@ actor Device {
             guard let port = mac_usb_open() else { throw DeviceError.unavailable }
             connection = port
             sequence = 0
-            do { _ = try exchange(0x1002, [1]) }
+            do {
+                var info = Reader(data: try exchange(0x1001).0, offset: 2)
+                let extensionID = try info.take(UInt32.self)
+                _ = try info.take(UInt16.self)
+                let extensions = try info.string()
+                guard extensionID == 6 || extensions.localizedCaseInsensitiveContains("MTP") else {
+                    throw DeviceError.unavailable
+                }
+                sequence = 0
+                _ = try exchange(0x1002, [1])
+            }
             catch { reset(); throw error }
         }
         var list = Reader(data: try exchange(0x1004).0)
