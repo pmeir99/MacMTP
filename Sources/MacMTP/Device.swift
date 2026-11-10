@@ -177,9 +177,21 @@ actor Device {
         }
     }
 
-    func download(_ entry: Entry, storage: UInt32, into folder: URL, progress: @Sendable (Int) -> Void) throws {
+    func thumbnail(_ entry: Entry) throws -> Data {
+        do {
+            let thumbnail = try exchange(0x100A, [entry.id]).0
+            if !thumbnail.isEmpty { return thumbnail }
+        } catch DeviceError.rejected(_) {}
+        guard entry.size <= 24 * 1024 * 1024 else { return Data() }
+        return try exchange(0x1009, [entry.id]).0
+    }
+
+    func download(_ entry: Entry, storage: UInt32, into folder: URL,
+                  filename: String? = nil, progress: @Sendable (Int) -> Void) throws {
         try validate(entry.name)
-        let target = folder.appendingPathComponent(entry.name, isDirectory: entry.folder)
+        let name = filename ?? entry.name
+        try validate(name)
+        let target = folder.appendingPathComponent(name, isDirectory: entry.folder)
         if entry.folder {
             try FileManager.default.createDirectory(at: target, withIntermediateDirectories: false)
             for child in try list(storage: storage, parent: entry.id) {
