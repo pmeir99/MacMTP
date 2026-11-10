@@ -14,6 +14,11 @@ struct MacMTPApp: App {
 }
 
 private struct Browser: View {
+    private enum Sort: String, CaseIterable {
+        case name = "Name", kind = "Kind", size = "Size", modified = "Date Modified"
+    }
+
+    @State private var sort: Sort = .name
     @State private var device = Device()
     @State private var storages: [Storage] = []
     @State private var storage: UInt32?
@@ -41,6 +46,19 @@ private struct Browser: View {
         entries.filter {
             (showHidden || !$0.name.hasPrefix(".")) &&
             (search.isEmpty || $0.name.localizedCaseInsensitiveContains(search))
+        }.sorted {
+            if $0.folder != $1.folder { return $0.folder }
+            switch sort {
+            case .size where $0.size != $1.size: return $0.size < $1.size
+            case .modified where $0.modified != $1.modified:
+                return ($0.modified ?? .distantPast) > ($1.modified ?? .distantPast)
+            case .kind:
+                let lhs = ($0.name as NSString).pathExtension.lowercased()
+                let rhs = ($1.name as NSString).pathExtension.lowercased()
+                if lhs != rhs { return lhs < rhs }
+            default: break
+            }
+            return $0.name.localizedStandardCompare($1.name) == .orderedAscending
         }
     }
 
@@ -90,6 +108,9 @@ private struct Browser: View {
                             Label(item.name, systemImage: item.folder ? "folder.fill" : "doc")
                                 .onTapGesture(count: 2) { open(item) }
                         }
+                        TableColumn("Date Modified") { item in
+                            Text(item.modified?.formatted(date: .abbreviated, time: .shortened) ?? "—")
+                        }
                         TableColumn("Kind") { item in Text(item.folder ? "Folder" : "File") }
                         TableColumn("Size") { item in Text(item.folder ? "—" : ByteCountFormatter.string(fromByteCount: Int64(item.size), countStyle: .file)) }
                     }
@@ -118,6 +139,9 @@ private struct Browser: View {
                     if selected.count == 1, let item = selected.first {
                         LabeledContent("Name", value: item.name)
                         LabeledContent("Kind", value: item.folder ? "Folder" : "File")
+                        if let modified = item.modified {
+                            LabeledContent("Modified", value: modified.formatted(date: .abbreviated, time: .shortened))
+                        }
                         if !item.folder { LabeledContent("Size", value: ByteCountFormatter.string(fromByteCount: Int64(item.size), countStyle: .file)) }
                     } else {
                         Text("Select one item to see its details.")
@@ -138,6 +162,9 @@ private struct Browser: View {
                     naming = true
                 }.disabled(busy || storage == nil)
                 Menu("View", systemImage: "slider.horizontal.3") {
+                    Picker("Sort By", selection: $sort) {
+                        ForEach(Sort.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                    }
                     Toggle("Grid", isOn: $grid)
                     Toggle("Hidden Files", isOn: $showHidden)
                     Toggle("Inspector", isOn: $inspector)
@@ -229,10 +256,12 @@ private struct Browser: View {
 
     private func reload() async throws {
         guard let storage else { return }
-        let result = try await device.list(storage: storage, parent: parent)
-        entries = result.sorted {
-            if $0.folder != $1.folder { return $0.folder }
-            return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        do {
+            entries = try await device.list(storage: storage, parent: parent)
+        } catch {
+            entries = []
+            selection = []
+            throw error
         }
         selection.formIntersection(entries.map(\.id))
     }
