@@ -11,6 +11,7 @@ struct Entry: Identifiable, Sendable {
     let name: String
     let folder: Bool
     let size: UInt32
+    let modified: Date?
 }
 
 enum DeviceError: LocalizedError {
@@ -73,6 +74,12 @@ actor Device {
     private var sequence: UInt32 = 0
     private var received = Data()
     private let block = 256 * 1024
+    private let timestamp: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd'T'HHmmss"
+        return formatter
+    }()
     private struct Header {
         let size: Int
         let type: UInt16
@@ -127,7 +134,10 @@ actor Device {
             _ = try info.take(UInt16.self)
             let size = try info.take(UInt32.self)
             info.offset = 52
-            return Entry(id: handle, name: try info.string(), folder: format == 0x3001, size: size)
+            let name = try info.string()
+            _ = try? info.string()
+            let modified = (try? info.string()).flatMap { timestamp.date(from: String($0.prefix(15))) }
+            return Entry(id: handle, name: name, folder: format == 0x3001, size: size, modified: modified)
         }
     }
 
@@ -267,7 +277,9 @@ actor Device {
             parameters.forEach { command.put($0) }
             try write(command, to: port)
             if let payload {
-                try write(header(payload.count, 2, operation, transaction) + payload, to: port)
+                let packet = header(payload.count, 2, operation, transaction) + payload
+                try write(packet, to: port)
+                if packet.count % Int(mac_usb_packet_size(port)) == 0 { try write(Data(), to: port) }
             }
             if let (file, size) = upload {
                 var packet = header(size, 2, operation, transaction)
