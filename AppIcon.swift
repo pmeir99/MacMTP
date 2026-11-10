@@ -3,7 +3,7 @@ import AppKit
 let size = 1024
 let frame = NSRect(x: 0, y: 0, width: size, height: size)
 let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: size, pixelsHigh: size,
-                              bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                              bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
                               colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
 NSGraphicsContext.saveGraphicsState()
 NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
