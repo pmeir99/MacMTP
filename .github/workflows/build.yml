@@ -24,7 +24,6 @@ jobs:
         run: bash package.sh
       - uses: actions/upload-artifact@v7
         with:
-          name: MacMTP
-          path: dist/MacMTP.dmg
+          path: dist/MacMTP.zip
+          archive: false
           if-no-files-found: error
-          compression-level: 0
