@@ -20,8 +20,19 @@ cp -L "$usb/lib/libusb-1.0.0.dylib" "$library"
 chmod u+w "$library"
 dependency="$(otool -L "$binary" | awk '/libusb-1[.]0[.]0[.]dylib/ {print $1; exit}')"
 test -n "$dependency"
+codesign --remove-signature "$app/MacOS/MacMTP"
 install_name_tool -change "$dependency" '@executable_path/../Frameworks/libusb-1.0.0.dylib' "$app/MacOS/MacMTP"
 cp "$usb/COPYING" "$app/Resources/libusb-LICENSE.txt"
+iconset="$stage/work/MacMTP.iconset"
+mkdir -p "$iconset"
+swift AppIcon.swift "$stage/work/master.png"
+for size in 16 32 128 256 512; do
+    sips -z "$size" "$size" "$stage/work/master.png" --out "$iconset/icon_${size}x${size}.png" >/dev/null
+    doubled=$((size * 2))
+    sips -z "$doubled" "$doubled" "$stage/work/master.png" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil -c icns "$iconset" -o "$app/Resources/MacMTP.icns"
+rm -rf "$stage/work"
 cat > "$app/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -29,6 +40,7 @@ cat > "$app/Info.plist" <<'PLIST'
 <key>CFBundleExecutable</key><string>MacMTP</string>
 <key>CFBundleIdentifier</key><string>com.meir.macmtp</string>
 <key>CFBundleName</key><string>MacMTP</string>
+<key>CFBundleIconFile</key><string>MacMTP.icns</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>1.0.0</string>
 <key>CFBundleVersion</key><string>1</string>
