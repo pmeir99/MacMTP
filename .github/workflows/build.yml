@@ -19,10 +19,6 @@ jobs:
             slot: 1
           - runner: xcode-27
             slot: 2
-          - runner: macos-latest
-            slot: 1
-          - runner: macos-26
-            slot: 1
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     permissions:
