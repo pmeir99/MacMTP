@@ -24,10 +24,23 @@ func install() throws {
     let helper = URL(fileURLWithPath: args[0]).standardizedFileURL.resolvingSymlinksInPath()
     let installed = helper.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
     let expectedParent = installed.appendingPathComponent("Contents/MacOS/MacMTP").path
-    guard getppid() == pid, executablePath(pid) == expectedParent,
-          FileManager.default.isWritableFile(atPath: installed.deletingLastPathComponent().path),
-          let old = Bundle(url: installed)?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
-          let oldVersion = AppVersion(old), version > oldVersion else { throw UpdateError.permission }
+    guard getppid() == pid else {
+        throw UpdateError.tool("The updater could not verify its parent process.")
+    }
+    guard let parentPath = executablePath(pid),
+          URL(fileURLWithPath: parentPath).resolvingSymlinksInPath().path == expectedParent else {
+        throw UpdateError.tool("The updater could not verify the running MacMTP executable.")
+    }
+    guard FileManager.default.isWritableFile(atPath: installed.deletingLastPathComponent().path) else {
+        throw UpdateError.permission
+    }
+    guard let old = Bundle(url: installed)?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+          let oldVersion = AppVersion(old) else {
+        throw UpdateError.tool("The installed MacMTP version could not be read.")
+    }
+    guard version > oldVersion else {
+        throw UpdateError.tool("The update version must be newer than installed MacMTP \(oldVersion.value).")
+    }
 
     let workspace = UpdateFiles.workspace(token)
     let source = URL(fileURLWithPath: args[2]).standardizedFileURL
