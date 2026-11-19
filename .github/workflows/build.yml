@@ -82,7 +82,7 @@ jobs:
         if: steps.claim.outputs.winner == 'true'
         run: |
           usb="$(brew --prefix libusb)"
-          PKG_CONFIG_PATH="$usb/lib/pkgconfig" swift test -Xswiftc -warnings-as-errors -Xcc "-I$usb/include/libusb-1.0"
+          MACMTP_TEST_APP="$PWD/dist/MacMTP.app" PKG_CONFIG_PATH="$usb/lib/pkgconfig" swift test -Xswiftc -warnings-as-errors -Xcc "-I$usb/include/libusb-1.0"
       - uses: actions/upload-artifact@v7
         if: steps.claim.outputs.winner == 'true'
         with:

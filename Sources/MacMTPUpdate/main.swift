@@ -4,7 +4,8 @@ import Darwin
 import UpdateSupport
 
 func executablePath(_ pid: pid_t) -> String? {
-    var bytes = [CChar](repeating: 0, count: Int(PROC_PIDPATHINFO_MAXSIZE))
+    // libproc defines PROC_PIDPATHINFO_MAXSIZE as 4 * MAXPATHLEN.
+    var bytes = [CChar](repeating: 0, count: 4096)
     let length = proc_pidpath(pid, &bytes, UInt32(bytes.count))
     guard length > 0 else { return nil }
     let path = bytes.prefix(Int(length)).prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }
@@ -71,7 +72,7 @@ func install() throws {
         removeReplacement = true
         try? Data(error.localizedDescription.utf8).write(to: UpdateFiles.root.appendingPathComponent("last-error"),
                                                        options: .atomic)
-        try? UpdateFiles.tool("/usr/bin/open", ["-n", installed.path])
+        _ = try? UpdateFiles.tool("/usr/bin/open", ["-n", installed.path])
         throw error
     }
 }
