@@ -44,6 +44,11 @@ cat > "$app/Info.plist" <<'PLIST'
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>1.0.0</string>
 <key>CFBundleVersion</key><string>1</string>
+<key>NSDesktopFolderUsageDescription</key><string>MacMTP copies files you choose between your Desktop and your Android device.</string>
+<key>NSDocumentsFolderUsageDescription</key><string>MacMTP copies files you choose between Documents and your Android device.</string>
+<key>NSDownloadsFolderUsageDescription</key><string>MacMTP saves Android downloads here and uploads files you choose from Downloads.</string>
+<key>NSRemovableVolumesUsageDescription</key><string>MacMTP copies files you choose between external drives and your Android device.</string>
+<key>NSNetworkVolumesUsageDescription</key><string>MacMTP copies files you choose between network folders and your Android device.</string>
 <key>LSMinimumSystemVersion</key><string>27.0</string>
 </dict></plist>
 PLIST

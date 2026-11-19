@@ -15,11 +15,25 @@ struct Entry: Identifiable, Sendable {
 }
 
 enum DeviceError: LocalizedError {
-    case unavailable, malformed, tooLarge, unsafeName, transport(Int32), rejected(UInt16)
+    case unavailable, interfaceBusy, usbAccessDenied, malformed, tooLarge, unsafeName
+    case transport(Int32), rejected(UInt16)
+
+    static func openingUSB(_ status: Int32) -> DeviceError {
+        switch status {
+        case -6: .interfaceBusy
+        case -3: .usbAccessDenied
+        case -4: .unavailable
+        default: .transport(status)
+        }
+    }
 
     var errorDescription: String? {
         switch self {
         case .unavailable: "Unlock your Android device and select USB File Transfer."
+        case .interfaceBusy:
+            "Another app is using the Android USB interface. Use Recover USB Connection, or close Android transfer and debugging apps, then reconnect the phone."
+        case .usbAccessDenied:
+            "macOS denied access to the USB device. Unlock this Mac, reconnect the phone, and approve any accessory connection prompt. Check Privacy & Security in System Settings."
         case .malformed: "The device sent an invalid MTP response. Reconnect the device and try again."
         case .tooLarge: "This operation exceeds the supported MTP size."
         case .unsafeName: "The file or folder name is invalid."
@@ -102,7 +116,8 @@ actor Device {
 
     func connect() throws -> [Storage] {
         if connection == nil {
-            guard let port = mac_usb_open() else { throw DeviceError.unavailable }
+            var status: Int32 = 0
+            guard let port = mac_usb_open(&status) else { throw DeviceError.openingUSB(status) }
             connection = port
             sequence = 0
             do {

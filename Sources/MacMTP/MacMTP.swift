@@ -23,6 +23,10 @@ private struct Browser: View {
 
     @State private var sort: Sort = .name
     @State private var device = Device()
+    @State private var usbRecovery = USBRecovery()
+    @AppStorage("automaticUSBRecovery") private var automaticUSBRecovery = true
+    @State private var startupRecoveryDone = false
+    @State private var connectionMessage = DeviceError.unavailable.localizedDescription
     @State private var storages: [Storage] = []
     @State private var storage: UInt32?
     @State private var folders: [Entry] = []
@@ -98,7 +102,7 @@ private struct Browser: View {
             VStack(spacing: 0) {
                 if storage == nil {
                     ContentUnavailableView("No Storage Selected", systemImage: "cable.connector",
-                                           description: Text("Unlock your Android device and select USB File Transfer."))
+                                           description: Text(connectionMessage))
                 } else {
                     browserContent
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -180,16 +184,42 @@ private struct Browser: View {
                     Toggle("Hidden Files", isOn: $showHidden)
                     Toggle("Inspector", isOn: $inspector)
                     Button("Recent Activity") { showHistory = true }
+                    Divider()
+                    Toggle("Automatic USB Recovery on Launch", isOn: $automaticUSBRecovery)
+                        .help("On launch, quits OpenMTP and Android File Transfer and stops the local ADB server. This can interrupt their transfers or debugging sessions.")
+                    Button("Recover USB Connection") {
+                        run { try await recoverUSBConnection() }
+                    }
+                    .disabled(busy)
+                    .help("Release Android USB from known transfer apps and the local ADB server, then reconnect")
+                    Button("Open macOS Permission Settings") {
+                        if let url = URL(string: "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
                 }.help("Sorting, hidden files, inspector, and recent activity")
             }
         }
         .task {
+            if !startupRecoveryDone {
+                startupRecoveryDone = true
+                if automaticUSBRecovery {
+                    busy = true
+                    status = "Releasing Android USB…"
+                    let messages = await usbRecovery.recover()
+                    messages.forEach { record($0) }
+                    status = messages.isEmpty ? "" : "USB recovery checked. Connecting…"
+                    busy = false
+                }
+            }
             while !Task.isCancelled {
                 if !busy {
                     busy = true
                     let previous = storages
                     do {
                         storages = try await device.connect()
+                        connectionMessage = DeviceError.unavailable.localizedDescription
+                        status = ""
                         if !storages.contains(where: { $0.id == storage }) {
                             storage = storages.first?.id
                         }
@@ -197,7 +227,8 @@ private struct Browser: View {
                         storages = []
                         storage = nil
                         entries = []
-                        if !previous.isEmpty { status = "Device disconnected" }
+                        connectionMessage = error.localizedDescription
+                        status = previous.isEmpty ? error.localizedDescription : "Device disconnected. \(error.localizedDescription)"
                     }
                     busy = false
                 }
@@ -493,6 +524,25 @@ private struct Browser: View {
             throw error
         }
         selection.formIntersection(entries.map(\.id))
+    }
+
+    private func recoverUSBConnection() async throws {
+        await device.disconnect()
+        storages = []
+        storage = nil
+        entries = []
+        selection = []
+        status = "Releasing Android USB…"
+        let messages = await usbRecovery.recover()
+        messages.forEach { record($0) }
+        do {
+            storages = try await device.connect()
+            storage = storages.first?.id
+            connectionMessage = DeviceError.unavailable.localizedDescription
+        } catch {
+            connectionMessage = error.localizedDescription
+            throw error
+        }
     }
 
     private func reconnect() async throws {

@@ -2,12 +2,14 @@
 #include <libusb.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 struct MacUSB {
     libusb_context *context;
     libusb_device_handle *handle;
     uint8_t input, output, interface;
     int packet_size;
+    int last_error;
 };
 
 static int claim(MacUSB *connection, libusb_device *device,
@@ -26,21 +28,33 @@ static int claim(MacUSB *connection, libusb_device *device,
     }
     if (!input || !output || !packet_size) return 0;
     libusb_device_handle *handle = NULL;
-    if (libusb_open(device, &handle) != 0) return 0;
     int still_image = interface->bInterfaceClass == LIBUSB_CLASS_IMAGE &&
                       interface->bInterfaceSubClass == 1;
+    int status = libusb_open(device, &handle);
+    if (status != 0) {
+        if (still_image) connection->last_error = status;
+        return 0;
+    }
     unsigned char name[64] = {0};
     int length = interface->iInterface
         ? libusb_get_string_descriptor_ascii(handle, interface->iInterface, name, sizeof(name))
         : 0;
-    if ((!still_image && (length < 3 || strncasecmp((char *)name, "MTP", 3))) ||
-        libusb_claim_interface(handle, interface->bInterfaceNumber) != 0) {
+    if (!still_image && (length < 3 || strncasecmp((char *)name, "MTP", 3))) {
         libusb_close(handle);
         return 0;
     }
-    if (interface->bAlternateSetting &&
-        libusb_set_interface_alt_setting(handle, interface->bInterfaceNumber,
-                                         interface->bAlternateSetting) != 0) {
+    status = libusb_claim_interface(handle, interface->bInterfaceNumber);
+    if (status != 0) {
+        connection->last_error = status;
+        libusb_close(handle);
+        return 0;
+    }
+    if (interface->bAlternateSetting) {
+        status = libusb_set_interface_alt_setting(handle, interface->bInterfaceNumber,
+                                                  interface->bAlternateSetting);
+    }
+    if (status != 0) {
+        connection->last_error = status;
         libusb_release_interface(handle, interface->bInterfaceNumber);
         libusb_close(handle);
         return 0;
@@ -53,15 +67,21 @@ static int claim(MacUSB *connection, libusb_device *device,
     return 1;
 }
 
-MacUSB *mac_usb_open(void) {
+MacUSB *mac_usb_open(int *error) {
+    if (!error) return NULL;
+    *error = LIBUSB_ERROR_NO_MEM;
     MacUSB *connection = calloc(1, sizeof(*connection));
     if (!connection) return NULL;
-    if (libusb_init(&connection->context) != 0) {
+    int status = libusb_init(&connection->context);
+    if (status != 0) {
+        *error = status;
         free(connection);
         return NULL;
     }
+    connection->last_error = LIBUSB_ERROR_NO_DEVICE;
     libusb_device **devices = NULL;
     ssize_t count = libusb_get_device_list(connection->context, &devices);
+    if (count < 0) connection->last_error = (int)count;
     for (ssize_t i = 0; i < count && !connection->handle; i++) {
         struct libusb_config_descriptor *config = NULL;
         if (libusb_get_active_config_descriptor(devices[i], &config) != 0) continue;
@@ -77,7 +97,11 @@ MacUSB *mac_usb_open(void) {
         libusb_free_config_descriptor(config);
     }
     if (devices) libusb_free_device_list(devices, 1);
-    if (connection->handle) return connection;
+    if (connection->handle) {
+        *error = 0;
+        return connection;
+    }
+    *error = connection->last_error;
     mac_usb_close(connection);
     return NULL;
 }
