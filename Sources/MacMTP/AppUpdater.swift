@@ -99,7 +99,7 @@ final class AppUpdater: ObservableObject {
                 let archive = workspace.appendingPathComponent("MacMTP.zip")
                 let download = UpdateDownload(destination: archive, size: candidate.1.size) { [self] amount in
                     Task { @MainActor [self] in
-                        if phase == .downloading { progress = amount }
+                        if self.phase == .downloading { self.progress = amount }
                     }
                 }
                 _ = try await download.download(candidate.1.browser_download_url)
