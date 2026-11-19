@@ -30,7 +30,7 @@ func install() throws {
 
     let workspace = UpdateFiles.workspace(token)
     let source = URL(fileURLWithPath: args[2]).standardizedFileURL
-    guard source == workspace.appendingPathComponent("unpacked/MacMTP.app") else { throw UpdateError.invalidArchive }
+    guard source.path == workspace.appendingPathComponent("unpacked/MacMTP.app").path else { throw UpdateError.invalidArchive }
     try UpdateFiles.verifyApplication(source, version: version.value)
     let replacement = installed.deletingLastPathComponent()
         .appendingPathComponent(".MacMTP-update-\(token.uuidString).app")

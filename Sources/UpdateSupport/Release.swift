@@ -108,7 +108,7 @@ public enum UpdateFiles {
 
     public static func verifyApplication(_ app: URL, version: String) throws {
         let resolved = app.standardizedFileURL.resolvingSymlinksInPath()
-        guard resolved == app.standardizedFileURL, app.pathExtension == "app",
+        guard resolved.path == app.standardizedFileURL.path, app.pathExtension == "app",
               let bundle = Bundle(url: app),
               bundle.bundleIdentifier == identifier,
               bundle.object(forInfoDictionaryKey: "CFBundleExecutable") as? String == "MacMTP",

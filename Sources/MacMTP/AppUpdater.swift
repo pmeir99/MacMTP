@@ -57,7 +57,9 @@ final class AppUpdater: ObservableObject {
             request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
             request.setValue("MacMTP/\(currentVersion)", forHTTPHeaderField: "User-Agent")
             let (data, response) = try await URLSession.shared.data(for: request)
-            guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw UpdateError.invalidRelease }
+            guard (response as? HTTPURLResponse)?.statusCode == 200,
+                  response.url?.scheme == "https", response.url?.host == "api.github.com",
+                  data.count <= 1_048_576 else { throw UpdateError.invalidRelease }
             let release = try JSONDecoder().decode(GitHubRelease.self, from: data)
             if let update = try release.update(after: installed) {
                 candidate = update
@@ -89,7 +91,7 @@ final class AppUpdater: ObservableObject {
             do {
                 let installed = Bundle.main.bundleURL.standardizedFileURL
                 guard installed.pathExtension == "app",
-                      installed.resolvingSymlinksInPath() == installed,
+                      installed.resolvingSymlinksInPath().path == installed.path,
                       FileManager.default.isWritableFile(atPath: installed.deletingLastPathComponent().path)
                 else { throw UpdateError.permission }
                 try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true,
