@@ -153,6 +153,7 @@ final class AppUpdater: ObservableObject {
 }
 
 struct SoftwareUpdateView: View {
+    @Environment(\.dismiss) private var dismiss
     @ObservedObject var updater: AppUpdater
 
     var body: some View {
@@ -212,8 +213,19 @@ struct SoftwareUpdateView: View {
                 }
             }
             Divider()
-            Toggle("Check for updates automatically", isOn: $updater.automaticallyChecks)
+            HStack {
+                Toggle("Check for updates automatically", isOn: $updater.automaticallyChecks)
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .disabled(updater.isInstalling)
+                Spacer()
+                Button("Done") {
+                    updater.showWindow = false
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
                 .disabled(updater.isInstalling)
+            }
             Text("Updates are verified against GitHub’s SHA-256 digest before installation.")
                 .font(.caption).foregroundStyle(.tertiary)
         }
