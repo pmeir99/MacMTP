@@ -20,6 +20,10 @@ USB recovery is enabled on launch and can stop ADB debugging or close Android tr
 
 The app is ad hoc signed. macOS may require approval in Privacy & Security on first launch."
 fi
+# A retry can reuse a draft created by an earlier commit. Bind the release to
+# the commit whose verified app is being uploaded before publishing its tag.
+release_id="$(gh api "repos/$repo/releases/tags/$tag" --jq '.id')"
+gh api --method PATCH "repos/$repo/releases/$release_id" -f target_commitish="$GITHUB_SHA" >/dev/null
 gh release upload "$tag" dist/MacMTP.zip dist/MacMTP.dmg dist/SHA256SUMS.txt --clobber
 # The updater uses GitHub's own asset digest. Verify it before exposing the release.
 for attempt in 1 2 3 4 5; do
