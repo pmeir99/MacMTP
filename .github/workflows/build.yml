@@ -78,7 +78,7 @@ jobs:
       - name: Build and verify Apple Silicon package
         if: steps.claim.outputs.winner == 'true'
         run: bash package.sh
-      - name: Verify transfer accounting
+      - name: Run app regression checks
         if: steps.claim.outputs.winner == 'true'
         run: |
           usb="$(brew --prefix libusb)"
@@ -89,6 +89,11 @@ jobs:
           path: dist/MacMTP.zip
           archive: false
           if-no-files-found: error
+      - name: Publish verified GitHub Release
+        if: steps.claim.outputs.winner == 'true'
+        run: bash .github/scripts/publish-release.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
   cleanup:
     name: Verify winner and remove runner claim
     needs: package

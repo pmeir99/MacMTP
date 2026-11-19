@@ -2,6 +2,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 [[ "$(uname -m)" == arm64 ]]
+version="$(tr -d '\r\n' < VERSION)"
+[[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
 export HOMEBREW_NO_AUTO_UPDATE=1
 if ! brew list --versions libusb >/dev/null; then brew install libusb; fi
 usb="$(brew --prefix libusb)"
@@ -13,8 +15,10 @@ mkdir -p dist
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 app="$stage/MacMTP.app/Contents"
-mkdir -p "$app/MacOS" "$app/Frameworks" "$app/Resources"
+mkdir -p "$app/MacOS" "$app/Frameworks" "$app/Resources" "$app/Helpers"
 cp "$binary" "$app/MacOS/MacMTP"
+cp "$(dirname "$binary")/MacMTPUpdate" "$app/Helpers/MacMTPUpdate"
+[[ "$(lipo -archs "$app/Helpers/MacMTPUpdate")" == arm64 ]]
 library="$app/Frameworks/libusb-1.0.0.dylib"
 cp -L "$usb/lib/libusb-1.0.0.dylib" "$library"
 chmod u+w "$library"
@@ -33,7 +37,7 @@ for size in 16 32 128 256 512; do
 done
 iconutil -c icns "$iconset" -o "$app/Resources/MacMTP.icns"
 rm -rf "$stage/work"
-cat > "$app/Info.plist" <<'PLIST'
+cat > "$app/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -42,8 +46,8 @@ cat > "$app/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>MacMTP</string>
 <key>CFBundleIconFile</key><string>MacMTP.icns</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>1.0.0</string>
-<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleShortVersionString</key><string>$version</string>
+<key>CFBundleVersion</key><string>$version</string>
 <key>NSDesktopFolderUsageDescription</key><string>MacMTP copies files you choose between your Desktop and your Android device.</string>
 <key>NSDocumentsFolderUsageDescription</key><string>MacMTP copies files you choose between Documents and your Android device.</string>
 <key>NSDownloadsFolderUsageDescription</key><string>MacMTP saves Android downloads here and uploads files you choose from Downloads.</string>
@@ -54,6 +58,7 @@ cat > "$app/Info.plist" <<'PLIST'
 PLIST
 plutil -lint "$app/Info.plist"
 codesign --force --sign - "$library"
+codesign --force --sign - "$app/Helpers/MacMTPUpdate"
 codesign --force --sign - "$stage/MacMTP.app"
 codesign --verify --deep --strict "$stage/MacMTP.app"
 rm -rf dist/MacMTP.app
@@ -63,3 +68,13 @@ rm -f dist/MacMTP.zip
 ditto -c -k --sequesterRsrc --keepParent dist/MacMTP.app dist/MacMTP.zip
 ditto -x -k dist/MacMTP.zip "$stage/unpacked"
 codesign --verify --deep --strict "$stage/unpacked/MacMTP.app"
+dist/MacMTP.app/Contents/Helpers/MacMTPUpdate --verify "$PWD/dist/MacMTP.app" "$version"
+image_source="$stage/image"
+mkdir -p "$image_source"
+ditto dist/MacMTP.app "$image_source/MacMTP.app"
+ln -s /Applications "$image_source/Applications"
+rm -f dist/MacMTP.dmg
+diskutil image create from --format UDZO --volumeName MacMTP "$image_source" "$PWD/dist/MacMTP.dmg"
+diskutil image info "$PWD/dist/MacMTP.dmg"
+test -s dist/MacMTP.dmg
+(cd dist && shasum -a 256 MacMTP.zip MacMTP.dmg > SHA256SUMS.txt)

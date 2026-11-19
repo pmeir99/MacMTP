@@ -10,13 +10,31 @@ import ImageIO
 
 @main
 struct MacMTPApp: App {
+    @StateObject private var updater = AppUpdater()
+
     var body: some Scene {
-        Window("MacMTP", id: "browser") { Browser() }
+        Window("MacMTP", id: "browser") {
+            Browser()
+                .environmentObject(updater)
+                .sheet(isPresented: $updater.showWindow) { SoftwareUpdateView(updater: updater) }
+                .onAppear { updater.launched() }
+        }
             .defaultSize(width: 1000, height: 650)
+            .commands {
+                CommandGroup(after: .appInfo) {
+                    Button("Check for Updates…") {
+                        updater.showWindow = true
+                        Task { await updater.check() }
+                    }.disabled(updater.isInstalling)
+                }
+            }
+
+        Settings { SoftwareUpdateView(updater: updater) }
     }
 }
 
 private struct Browser: View {
+    @EnvironmentObject private var updater: AppUpdater
     private enum Sort: String, CaseIterable {
         case name = "Name", kind = "Kind", size = "Size", modified = "Date Modified"
     }
@@ -200,6 +218,8 @@ private struct Browser: View {
                 }.help("Sorting, hidden files, inspector, and recent activity")
             }
         }
+        .disabled(updater.isInstalling)
+        .onChange(of: busy, initial: true) { _, value in updater.blockedByTransfer = value }
         .task {
             if !startupRecoveryDone {
                 startupRecoveryDone = true
@@ -213,7 +233,7 @@ private struct Browser: View {
                 }
             }
             while !Task.isCancelled {
-                if !busy {
+                if !busy && !updater.isInstalling {
                     busy = true
                     let previous = storages
                     do {
