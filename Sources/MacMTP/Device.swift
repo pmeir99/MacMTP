@@ -154,7 +154,47 @@ actor Device {
         _ = try create(name, storage: storage, parent: parent, size: 0, folder: true)
     }
 
-    func upload(_ url: URL, storage: UInt32, parent: UInt32, progress: @Sendable (Int) -> Void) throws {
+    func uploadSize(_ urls: [URL]) throws -> TransferSize {
+        var total = TransferSize()
+        for url in urls {
+            let attributes = try url.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey,
+                                                              .isSymbolicLinkKey, .fileSizeKey])
+            guard attributes.isSymbolicLink != true else { throw DeviceError.unsafeName }
+            if attributes.isDirectory == true {
+                let children = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)
+                total.add(try uploadSize(children))
+            } else {
+                guard attributes.isRegularFile == true, let size = attributes.fileSize, size >= 0,
+                      size <= Int(UInt32.max) - 12 else { throw DeviceError.tooLarge }
+                total.bytes += UInt64(size)
+                total.files += 1
+            }
+        }
+        return total
+    }
+
+    func downloadSize(_ entries: [Entry], storage: UInt32) throws -> TransferSize {
+        var visited = Set<UInt32>()
+        return try downloadSize(entries, storage: storage, visited: &visited)
+    }
+
+    private func downloadSize(_ entries: [Entry], storage: UInt32,
+                              visited: inout Set<UInt32>) throws -> TransferSize {
+        var total = TransferSize()
+        for entry in entries {
+            guard visited.insert(entry.id).inserted else { throw DeviceError.malformed }
+            if entry.folder {
+                let children = try list(storage: storage, parent: entry.id)
+                total.add(try downloadSize(children, storage: storage, visited: &visited))
+            } else {
+                total.bytes += UInt64(entry.size)
+                total.files += 1
+            }
+        }
+        return total
+    }
+
+    func upload(_ url: URL, storage: UInt32, parent: UInt32, progress: @Sendable (TransferEvent) -> Void) throws {
         let attributes = try url.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
         guard attributes.isSymbolicLink != true else { throw DeviceError.unsafeName }
         if attributes.isDirectory == true {
@@ -165,11 +205,13 @@ actor Device {
         } else {
             guard attributes.isRegularFile == true, let size = attributes.fileSize, size >= 0,
                   size <= Int(UInt32.max) - 12 else { throw DeviceError.tooLarge }
+            progress(.file(url.lastPathComponent))
             let file = try FileHandle(forReadingFrom: url)
             defer { try? file.close() }
             let handle = try create(url.lastPathComponent, storage: storage, parent: parent, size: UInt32(size), folder: false)
             do {
-                _ = try exchange(0x100D, upload: (file, size), progress: progress)
+                _ = try exchange(0x100D, upload: (file, size)) { progress(.bytes($0)) }
+                progress(.finishedFile)
             } catch {
                 if connection != nil { _ = try? exchange(0x100B, [handle, 0]) }
                 throw error
@@ -187,7 +229,7 @@ actor Device {
     }
 
     func download(_ entry: Entry, storage: UInt32, into folder: URL,
-                  filename: String? = nil, progress: @Sendable (Int) -> Void) throws {
+                  filename: String? = nil, progress: @Sendable (TransferEvent) -> Void) throws {
         try validate(entry.name)
         let name = filename ?? entry.name
         try validate(name)
@@ -198,6 +240,7 @@ actor Device {
                 try download(child, storage: storage, into: target, progress: progress)
             }
         } else {
+            progress(.file(name))
             let temporary = folder.appendingPathComponent(".macmtp-\(UUID().uuidString)")
             guard FileManager.default.createFile(atPath: temporary.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {
                 throw CocoaError(.fileWriteUnknown)
@@ -205,9 +248,10 @@ actor Device {
             defer { try? FileManager.default.removeItem(at: temporary) }
             let file = try FileHandle(forWritingTo: temporary)
             defer { try? file.close() }
-            _ = try exchange(0x1009, [entry.id], download: file, progress: progress)
+            _ = try exchange(0x1009, [entry.id], download: file) { progress(.bytes($0)) }
             try file.close()
             try FileManager.default.moveItem(at: temporary, to: target)
+            progress(.finishedFile)
         }
     }
 
@@ -307,7 +351,7 @@ actor Device {
                     }
                     try write(packet, to: port)
                     packet.removeAll(keepingCapacity: true)
-                    if remaining == 0 || (size - remaining) / block % 16 == 0 { progress(size - remaining) }
+                    progress(length)
                 }
                 if (size + 12) % Int(mac_usb_packet_size(port)) == 0 { try write(Data(), to: port) }
             }
@@ -321,9 +365,7 @@ actor Device {
                         let bytes = try read(min(block, remaining), from: port)
                         try download.write(contentsOf: bytes)
                         remaining -= bytes.count
-                        if remaining == 0 || (response.size - remaining) / block % 16 == 0 {
-                            progress(response.size - remaining)
-                        }
+                        progress(bytes.count)
                     }
                 } else {
                     guard response.size <= 32 * 1024 * 1024 else { throw DeviceError.tooLarge }

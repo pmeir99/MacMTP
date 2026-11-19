@@ -31,7 +31,8 @@ private struct Browser: View {
     @State private var search = ""
     @State private var busy = false
     @State private var status = ""
-    @State private var transferred = 0
+    @State private var transfers: [TransferProgress] = []
+    @State private var activeExports = 0
     @State private var failure: String?
     @State private var name = ""
     @State private var renaming: Entry?
@@ -113,13 +114,19 @@ private struct Browser: View {
                             receiveDrop(providers, to: parent)
                         }
                 }
+                if !transfers.isEmpty {
+                    Divider()
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(transfers) { TransferProgressView(transfer: $0) }
+                        }
+                    }
+                    .frame(height: min(CGFloat(transfers.count) * 104, 208))
+                }
                 Divider()
                 HStack {
-                    if busy { ProgressView().controlSize(.small) }
+                    if busy && transfers.isEmpty { ProgressView().controlSize(.small) }
                     Text(status.isEmpty ? "\(visible.count) items" : status)
-                    if busy && transferred > 0 {
-                        Text(ByteCountFormatter.string(fromByteCount: Int64(transferred), countStyle: .file))
-                    }
                     Spacer()
                     Text("\(selection.count) selected")
                 }
@@ -373,8 +380,26 @@ private struct Browser: View {
             return selection.contains(item.id) ? selected : [item]
         } export: { entry, destination in
             guard let storageID else { throw DeviceError.unavailable }
-            try await device.download(entry, storage: storageID, into: destination.deletingLastPathComponent(),
-                                      filename: destination.lastPathComponent) { _ in }
+            await MainActor.run {
+                activeExports += 1
+                busy = true
+            }
+            do {
+                try await download([entry], storage: storageID, to: destination.deletingLastPathComponent(),
+                                   filename: destination.lastPathComponent)
+                await MainActor.run {
+                    activeExports -= 1
+                    busy = activeExports > 0
+                    if !busy { status = "" }
+                }
+            } catch {
+                await MainActor.run {
+                    activeExports -= 1
+                    busy = activeExports > 0
+                    if !busy { status = "" }
+                }
+                throw error
+            }
         }
     }
 
@@ -481,7 +506,7 @@ private struct Browser: View {
         guard !busy else { return }
         busy = true
         Task { @MainActor in
-            defer { busy = false; status = ""; transferred = 0 }
+            defer { busy = activeExports > 0; status = "" }
             do { try await operation() }
             catch { failure = error.localizedDescription; try? await reload() }
         }
@@ -523,16 +548,20 @@ private struct Browser: View {
         let urls = urls.filter(\.isFileURL)
         guard let storage, !busy, !urls.isEmpty else { return false }
         run {
-            for url in urls {
-                transferred = 0
-                status = "Uploading \(url.lastPathComponent)"
-                try await device.upload(url, storage: storage, parent: destination) { count in
-                    Task { @MainActor in
-                        if busy { transferred = count }
-                    }
+            let transfer = addTransfer("Uploading to Android")
+            do {
+                let size = try await device.uploadSize(urls)
+                transfer.begin(size)
+                for url in urls {
+                    status = "Uploading \(url.lastPathComponent)"
+                    try await device.upload(url, storage: storage, parent: destination) { transfer.update($0) }
+                    record("Uploaded \(url.lastPathComponent)")
                 }
-                record("Uploaded \(url.lastPathComponent)")
+            } catch {
+                transfer.finish(error: error)
+                throw error
             }
+            transfer.finish()
             try await reload()
         }
         return true
@@ -544,17 +573,42 @@ private struct Browser: View {
         picker.canChooseFiles = false
         picker.canChooseDirectories = true
         guard picker.runModal() == .OK, let target = picker.url else { return }
-        run {
-            for item in items {
-                transferred = 0
-                status = "Downloading \(item.name)"
-                try await device.download(item, storage: storage, into: target) { count in
-                    Task { @MainActor in
-                        if busy { transferred = count }
-                    }
+        run { try await download(items, storage: storage, to: target) }
+    }
+
+    @MainActor
+    private func addTransfer(_ title: String) -> TransferProgress {
+        // Keep active transfers and the most recent completed operations.
+        if transfers.count >= 10 {
+            transfers.removeAll {
+                switch $0.snapshot().phase {
+                case .complete, .failed: true
+                default: false
                 }
+            }
+        }
+        let transfer = TransferProgress(title: title)
+        transfers.insert(transfer, at: 0)
+        return transfer
+    }
+
+    @MainActor
+    private func download(_ items: [Entry], storage: UInt32, to target: URL,
+                          filename: String? = nil) async throws {
+        let transfer = addTransfer("Downloading to Mac")
+        do {
+            let size = try await device.downloadSize(items, storage: storage)
+            transfer.begin(size)
+            for item in items {
+                status = "Downloading \(item.name)"
+                try await device.download(item, storage: storage, into: target,
+                                          filename: filename) { transfer.update($0) }
                 record("Downloaded \(item.name)")
             }
+            transfer.finish()
+        } catch {
+            transfer.finish(error: error)
+            throw error
         }
     }
 

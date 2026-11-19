@@ -10,20 +10,127 @@ concurrency:
   cancel-in-progress: true
 jobs:
   package:
-    runs-on: xcode-27
+    name: Package on ${{ matrix.runner }} (${{ matrix.slot }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: xcode-27
+            slot: 1
+          - runner: xcode-27
+            slot: 2
+          - runner: macos-latest
+            slot: 1
+          - runner: macos-26
+            slot: 1
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
+    permissions:
+      contents: write
     env:
       GIT_CONFIG_COUNT: '1'
       GIT_CONFIG_KEY_0: init.defaultBranch
       GIT_CONFIG_VALUE_0: main
     steps:
+      - name: Find a compatible Apple Silicon toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "eligible=false" >> "$GITHUB_OUTPUT"
+          [[ "$(uname -m)" == arm64 ]] || exit 0
+          for developer in "$(xcode-select -p)" /Applications/Xcode*.app/Contents/Developer; do
+            [[ -d "$developer" ]] || continue
+            sdk="$(DEVELOPER_DIR="$developer" xcrun --sdk macosx --show-sdk-version 2>/dev/null)" || continue
+            if [[ "${sdk%%.*}" -ge 27 ]]; then
+              echo "DEVELOPER_DIR=$developer" >> "$GITHUB_ENV"
+              echo "eligible=true" >> "$GITHUB_OUTPUT"
+              echo "Eligible runner with macOS SDK $sdk"
+              exit 0
+            fi
+          done
+          echo "This runner does not have the required macOS 27 SDK."
+      - name: Claim this build
+        id: claim
+        if: steps.toolchain.outputs.eligible == 'true'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            // A temporary tag gives createRef an atomic winner without adding a branch.
+            const ref = `refs/tags/macmtp-runner-claim-${context.runId}-${process.env.GITHUB_RUN_ATTEMPT}`;
+            try {
+              await github.rest.git.createRef({ ...context.repo, ref, sha: context.sha });
+              core.setOutput('winner', 'true');
+              await core.summary.addHeading('Winning MacMTP runner')
+                .addRaw(`${process.env.RUNNER_LABEL}, slot ${process.env.RUNNER_SLOT}`).write();
+            } catch (error) {
+              if (error.status !== 422) throw error;
+              const existing = await github.rest.git.getRef({
+                ...context.repo, ref: ref.replace(/^refs\//, '')
+              });
+              if (existing.data.object.sha !== context.sha) throw error;
+              core.info('Another runner won. Skipping this build.');
+              core.setOutput('winner', 'false');
+            }
+        env:
+          RUNNER_LABEL: ${{ matrix.runner }}
+          RUNNER_SLOT: ${{ matrix.slot }}
       - uses: actions/checkout@v7
+        if: steps.claim.outputs.winner == 'true'
         with:
           persist-credentials: false
       - name: Build and verify Apple Silicon package
+        if: steps.claim.outputs.winner == 'true'
         run: bash package.sh
+      - name: Verify transfer accounting
+        if: steps.claim.outputs.winner == 'true'
+        run: |
+          usb="$(brew --prefix libusb)"
+          PKG_CONFIG_PATH="$usb/lib/pkgconfig" swift test -Xswiftc -warnings-as-errors -Xcc "-I$usb/include/libusb-1.0"
       - uses: actions/upload-artifact@v7
+        if: steps.claim.outputs.winner == 'true'
         with:
           path: dist/MacMTP.zip
           archive: false
           if-no-files-found: error
+  cleanup:
+    name: Verify winner and remove runner claim
+    needs: package
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const ref = `tags/macmtp-runner-claim-${context.runId}-${process.env.GITHUB_RUN_ATTEMPT}`;
+            try {
+              await github.rest.git.deleteRef({ ...context.repo, ref });
+            } catch (error) {
+              if (error.status !== 404 && error.status !== 422) throw error;
+              // Confirm absence rather than ignoring an unexpected deletion error.
+              try {
+                await github.rest.git.getRef({ ...context.repo, ref });
+                throw error;
+              } catch (lookupError) {
+                if (lookupError.status !== 404) throw lookupError;
+              }
+            }
+            const run = await github.rest.actions.getWorkflowRun({
+              ...context.repo, run_id: context.runId
+            });
+            if (run.data.status === 'completed' && run.data.conclusion === 'cancelled') return;
+            if (process.env.PACKAGE_RESULT !== 'success') {
+              core.setFailed('The winning runner did not finish the package.');
+              return;
+            }
+            const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
+              ...context.repo, run_id: context.runId
+            });
+            if (!artifacts.data.artifacts.some(item => item.name === 'MacMTP.zip' && !item.expired)) {
+              core.setFailed('No MacMTP app artifact was produced by an eligible runner.');
+            }
+        env:
+          PACKAGE_RESULT: ${{ needs.package.result }}

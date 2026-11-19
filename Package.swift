@@ -7,7 +7,8 @@ let package = Package(
     targets: [
         .systemLibrary(name: "CLibUSB", pkgConfig: "libusb-1.0", providers: [.brew(["libusb"])]),
         .target(name: "USB", dependencies: ["CLibUSB"]),
-        .executableTarget(name: "MacMTP", dependencies: ["USB"])
+        .executableTarget(name: "MacMTP", dependencies: ["USB"]),
+        .testTarget(name: "MacMTPTests", dependencies: ["MacMTP"])
     ],
     swiftLanguageModes: [.v5]
 )
