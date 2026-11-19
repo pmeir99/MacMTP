@@ -22,12 +22,13 @@ The app is ad hoc signed. macOS may require approval in Privacy & Security on fi
 fi
 # A retry can reuse a draft created by an earlier commit. Bind the release to
 # the commit whose verified app is being uploaded before publishing its tag.
-release_id="$(gh api "repos/$repo/releases/tags/$tag" --jq '.id')"
+release_id="$(gh api "repos/$repo/releases?per_page=100" --jq ".[] | select(.tag_name == \"$tag\") | .id")"
+[[ "$release_id" =~ ^[0-9]+$ ]]
 gh api --method PATCH "repos/$repo/releases/$release_id" -f target_commitish="$GITHUB_SHA" >/dev/null
 gh release upload "$tag" dist/MacMTP.zip dist/MacMTP.dmg dist/SHA256SUMS.txt --clobber
 # The updater uses GitHub's own asset digest. Verify it before exposing the release.
 for attempt in 1 2 3 4 5; do
-  gh api "repos/$repo/releases/tags/$tag" > "$RUNNER_TEMP/macmtp-release.json"
+  gh api "repos/$repo/releases/$release_id" > "$RUNNER_TEMP/macmtp-release.json"
   if python3 - "$RUNNER_TEMP/macmtp-release.json" <<'PY'
 import hashlib, json, pathlib, sys
 release = json.loads(pathlib.Path(sys.argv[1]).read_text())
