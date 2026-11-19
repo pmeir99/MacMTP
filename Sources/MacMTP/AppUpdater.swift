@@ -23,6 +23,7 @@ final class AppUpdater: ObservableObject {
     private var job: Task<Void, Never>?
     private var checkedOnLaunch = false
     private var helper: Process?
+    var prepareForRelaunch: (@MainActor () async -> Void)?
 
     var isInstalling: Bool { [.downloading, .verifying, .installing].contains(phase) }
 
@@ -120,6 +121,10 @@ final class AppUpdater: ObservableObject {
                 guard !blockedByTransfer else {
                     throw UpdateError.tool("Finish the current transfer before installing this update.")
                 }
+                // Close the MTP session cleanly before quitting, so the reopened
+                // app can claim the same connected phone without a USB reconnect.
+                await prepareForRelaunch?()
+                try Task.checkCancellation()
                 try? FileManager.default.removeItem(at: UpdateFiles.root.appendingPathComponent("last-error"))
                 let process = Process()
                 process.executableURL = installed.appendingPathComponent("Contents/Helpers/MacMTPUpdate")

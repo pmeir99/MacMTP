@@ -219,6 +219,10 @@ private struct Browser: View {
             }
         }
         .disabled(updater.isInstalling)
+        .onAppear {
+            let connectedDevice = device
+            updater.prepareForRelaunch = { await connectedDevice.disconnect() }
+        }
         .onChange(of: busy, initial: true) { _, value in updater.blockedByTransfer = value }
         .task {
             if !startupRecoveryDone {
