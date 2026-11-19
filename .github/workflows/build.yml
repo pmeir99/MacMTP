@@ -114,10 +114,10 @@ jobs:
                 if (lookupError.status !== 404) throw lookupError;
               }
             }
-            const run = await github.rest.actions.getWorkflowRun({
-              ...context.repo, run_id: context.runId
-            });
-            if (run.data.status === 'completed' && run.data.conclusion === 'cancelled') return;
+            if (process.env.PACKAGE_RESULT === 'cancelled') {
+              core.info('Build superseded or cancelled; the temporary claim has been removed.');
+              return;
+            }
             if (process.env.PACKAGE_RESULT !== 'success') {
               core.setFailed('The winning runner did not finish the package.');
               return;
