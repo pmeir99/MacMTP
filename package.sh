@@ -73,8 +73,21 @@ image_source="$stage/image"
 mkdir -p "$image_source"
 ditto dist/MacMTP.app "$image_source/MacMTP.app"
 ln -s /Applications "$image_source/Applications"
-rm -f dist/MacMTP.dmg
-diskutil image create from --format UDZO --volumeName MacMTP "$image_source" "$PWD/dist/MacMTP.dmg"
-diskutil image info "$PWD/dist/MacMTP.dmg"
-test -s dist/MacMTP.dmg
+image_ready=false
+for attempt in 1 2 3; do
+    rm -f dist/MacMTP.dmg
+    if diskutil image create from --format UDZO --volumeName MacMTP "$image_source" "$PWD/dist/MacMTP.dmg" > "$stage/image.log" 2>&1 &&
+       diskutil image info "$PWD/dist/MacMTP.dmg" >> "$stage/image.log" 2>&1 &&
+       test -s dist/MacMTP.dmg; then
+        image_ready=true
+        cat "$stage/image.log"
+        break
+    fi
+    echo "The disk-image service was not ready; retrying ($attempt/3)."
+    sleep "$((attempt * 2))"
+done
+if [[ "$image_ready" != true ]]; then
+    cat "$stage/image.log" >&2
+    exit 1
+fi
 (cd dist && shasum -a 256 MacMTP.zip MacMTP.dmg > SHA256SUMS.txt)
