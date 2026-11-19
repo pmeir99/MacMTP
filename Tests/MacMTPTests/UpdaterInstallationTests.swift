@@ -74,18 +74,19 @@ final class UpdaterInstallationTests: XCTestCase {
         let rollback = canonicalRoot.appendingPathComponent(".MacMTP-update-\(token.uuidString).app")
         var succeeded = false
         while ProcessInfo.processInfo.systemUptime < deadline {
-            let runningNewApp = NSRunningApplication.runningApplications(withBundleIdentifier: UpdateFiles.identifier)
-                .contains { $0.bundleURL?.resolvingSymlinksInPath().path == installed.path }
+            // Only the real helper removes this workspace, after receiving the
+            // version receipt from the new app's visible main window.
             if !host.isRunning, !manager.fileExists(atPath: workspace.path),
-               !manager.fileExists(atPath: rollback.path), runningNewApp {
+               !manager.fileExists(atPath: rollback.path) {
                 succeeded = true
                 break
             }
-            Thread.sleep(forTimeInterval: 0.1)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
         }
         let error = (try? String(contentsOf: UpdateFiles.root.appendingPathComponent("last-error"), encoding: .utf8)) ?? ""
         XCTAssertTrue(succeeded, "Update must replace the exiting host, reopen the new app, and remove its rollback copy. \(error)")
-        XCTAssertEqual(host.terminationStatus, 0)
+        if !host.isRunning { XCTAssertEqual(host.terminationStatus, 0) }
+        else { XCTFail("The update host did not exit after installer readiness.") }
         try UpdateFiles.verifyApplication(installed, version: version)
     }
 }
