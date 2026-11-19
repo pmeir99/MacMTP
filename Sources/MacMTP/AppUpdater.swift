@@ -129,11 +129,14 @@ final class AppUpdater: ObservableObject {
                 process.standardError = FileHandle.nullDevice
                 try process.run()
                 helper = process
-                let deadline = ProcessInfo.processInfo.systemUptime + 30
+                let deadline = ProcessInfo.processInfo.systemUptime + 120
                 while !FileManager.default.fileExists(atPath: workspace.appendingPathComponent("ready").path) {
-                    guard process.isRunning, ProcessInfo.processInfo.systemUptime < deadline else {
-                        throw UpdateError.timeout
+                    guard process.isRunning else {
+                        let message = try? String(contentsOf: UpdateFiles.root.appendingPathComponent("last-error"),
+                                                  encoding: .utf8)
+                        throw UpdateError.tool(message ?? UpdateError.timeout.localizedDescription)
                     }
+                    guard ProcessInfo.processInfo.systemUptime < deadline else { throw UpdateError.timeout }
                     try await Task.sleep(for: .milliseconds(100))
                 }
                 phase = .installing

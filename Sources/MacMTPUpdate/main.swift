@@ -49,7 +49,14 @@ func install() throws {
         usleep(100_000)
     }
 
-    try UpdateTransaction.swap(installed, replacement)
+    do {
+        try UpdateTransaction.swap(installed, replacement)
+    } catch {
+        try? Data(error.localizedDescription.utf8).write(to: UpdateFiles.root.appendingPathComponent("last-error"),
+                                                       options: .atomic)
+        _ = try? UpdateFiles.tool("/usr/bin/open", ["-n", installed.path])
+        throw error
+    }
     removeReplacement = false
     do {
         try UpdateFiles.tool("/usr/bin/open", ["-n", installed.path, "--args",
@@ -64,10 +71,13 @@ func install() throws {
         try? FileManager.default.removeItem(at: workspace)
     } catch {
         // The old app remains at replacement after the swap. Restore and reopen it.
-        for app in NSRunningApplication.runningApplications(withBundleIdentifier: UpdateFiles.identifier)
-            where app.bundleURL?.standardizedFileURL == installed {
-            app.terminate()
-        }
+        let instances = NSRunningApplication.runningApplications(withBundleIdentifier: UpdateFiles.identifier)
+            .filter { $0.bundleURL?.standardizedFileURL.path == installed.path }
+        for app in instances { app.terminate() }
+        let quitDeadline = ProcessInfo.processInfo.systemUptime + 2
+        while instances.contains(where: { !$0.isTerminated }),
+              ProcessInfo.processInfo.systemUptime < quitDeadline { usleep(100_000) }
+        for app in instances where !app.isTerminated { app.forceTerminate() }
         try UpdateTransaction.swap(installed, replacement)
         removeReplacement = true
         try? Data(error.localizedDescription.utf8).write(to: UpdateFiles.root.appendingPathComponent("last-error"),
