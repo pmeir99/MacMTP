@@ -1,4 +1,5 @@
 import Foundation
+import UpdateSupport
 
 final class UpdateDownload: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
     private let destination: URL

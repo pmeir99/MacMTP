@@ -97,9 +97,9 @@ final class AppUpdater: ObservableObject {
                 try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true,
                                                         attributes: [.posixPermissions: 0o700])
                 let archive = workspace.appendingPathComponent("MacMTP.zip")
-                let download = UpdateDownload(destination: archive, size: candidate.1.size) { [weak self] amount in
-                    Task { @MainActor in
-                        if self?.phase == .downloading { self?.progress = amount }
+                let download = UpdateDownload(destination: archive, size: candidate.1.size) { [self] amount in
+                    Task { @MainActor [self] in
+                        if phase == .downloading { progress = amount }
                     }
                 }
                 _ = try await download.download(candidate.1.browser_download_url)
@@ -120,6 +120,7 @@ final class AppUpdater: ObservableObject {
                 guard !blockedByTransfer else {
                     throw UpdateError.tool("Finish the current transfer before installing this update.")
                 }
+                try? FileManager.default.removeItem(at: UpdateFiles.root.appendingPathComponent("last-error"))
                 let process = Process()
                 process.executableURL = installed.appendingPathComponent("Contents/Helpers/MacMTPUpdate")
                 process.arguments = ["--install", source.path, candidate.0.value,
