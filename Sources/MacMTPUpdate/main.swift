@@ -58,6 +58,9 @@ func install() throws {
     try Data("ready".utf8).write(to: workspace.appendingPathComponent("ready"), options: .atomic)
     let deadline = ProcessInfo.processInfo.systemUptime + 60
     while executablePath(pid) == expectedParent {
+        if FileManager.default.fileExists(atPath: workspace.appendingPathComponent("cancel").path) {
+            throw UpdateError.tool("The update was canceled because MacMTP could not quit. The installed app has not been replaced.")
+        }
         guard ProcessInfo.processInfo.systemUptime < deadline else { throw UpdateError.timeout }
         usleep(100_000)
     }

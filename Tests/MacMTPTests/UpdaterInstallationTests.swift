@@ -3,7 +3,15 @@ import XCTest
 import UpdateSupport
 
 final class UpdaterInstallationTests: XCTestCase {
-    func testHelperReplacesExitingAppAndReopensNewVersion() throws {
+    func testHelperDismissesModalSheetQuitsAndReopensNewVersion() throws {
+        try exerciseUpdate(refuseQuit: false)
+    }
+
+    func testRefusedQuitCancelsHelperWithoutReplacingApp() throws {
+        try exerciseUpdate(refuseQuit: true)
+    }
+
+    private func exerciseUpdate(refuseQuit: Bool) throws {
         guard let path = ProcessInfo.processInfo.environment["MACMTP_TEST_APP"] else {
             throw XCTSkip("Set MACMTP_TEST_APP to exercise the packaged update helper.")
         }
@@ -39,36 +47,91 @@ final class UpdaterInstallationTests: XCTestCase {
         dictionary["CFBundleVersion"] = "1.0.0"
         try PropertyListSerialization.data(fromPropertyList: dictionary, format: .xml, options: 0).write(to: info)
         let hostSource = canonicalRoot.appendingPathComponent("UpdateHost.swift")
-        // A small parent process follows the app's real readiness-and-exit protocol.
-        // The helper and the relaunched app are the actual packaged executables.
+        // Exercise the real AppKit quit barrier that the former exit(0) host skipped.
+        // Compile the production handoff utility into an AppKit host at the installed executable path.
         let code = #"""
         import Foundation
+        import AppKit
         import Darwin
-        let args = CommandLine.arguments
-        guard args.count == 4 else { exit(2) }
-        let app = URL(fileURLWithPath: args[0]).deletingLastPathComponent()
-            .deletingLastPathComponent().deletingLastPathComponent()
-        let helper = Process()
-        helper.executableURL = app.appendingPathComponent("Contents/Helpers/MacMTPUpdate")
-        helper.arguments = ["--install", args[1], args[2], String(getpid()), args[3]]
-        try helper.run()
-        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-        let ready = caches.appendingPathComponent("com.meir.macmtp/Updates")
-            .appendingPathComponent(args[3]).appendingPathComponent("ready")
-        let deadline = ProcessInfo.processInfo.systemUptime + 30
-        while !FileManager.default.fileExists(atPath: ready.path) {
-            if !helper.isRunning || ProcessInfo.processInfo.systemUptime > deadline { exit(3) }
-            usleep(100_000)
+
+        @MainActor final class Delegate: NSObject, NSApplicationDelegate {
+            var window: NSWindow!
+            var sheet: NSWindow!
+            func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+                CommandLine.arguments.last == "refuse" ? .terminateCancel : .terminateNow
+            }
+            func applicationDidFinishLaunching(_ notification: Notification) {
+                window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 300),
+                                  styleMask: [.titled], backing: .buffered, defer: false)
+                window.makeKeyAndOrderFront(nil)
+                sheet = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 150),
+                                 styleMask: [.titled], backing: .buffered, defer: false)
+                sheet.preventsApplicationTerminationWhenModal = true
+                window.beginSheet(sheet)
+                Task { @MainActor in
+                    do {
+                        let args = CommandLine.arguments
+                        guard args.count == 5 else { exit(2) }
+                        let app = URL(fileURLWithPath: args[0]).deletingLastPathComponent()
+                            .deletingLastPathComponent().deletingLastPathComponent()
+                        let helper = Process()
+                        helper.executableURL = app.appendingPathComponent("Contents/Helpers/MacMTPUpdate")
+                        helper.arguments = ["--install", args[1], args[2], String(getpid()), args[3]]
+                        try helper.run()
+                        let workspace = UpdateFiles.workspace(UUID(uuidString: args[3])!)
+                        let deadline = ProcessInfo.processInfo.systemUptime + 30
+                        while !FileManager.default.fileExists(atPath: workspace.appendingPathComponent("ready").path) {
+                            if !helper.isRunning || ProcessInfo.processInfo.systemUptime > deadline { exit(3) }
+                            try await Task.sleep(for: .milliseconds(100))
+                        }
+                        // Reproduce the old bug before using the corrected production handoff.
+                        NSApplication.shared.terminate(nil)
+                        try await Task.sleep(for: .milliseconds(150))
+                        guard self.window.attachedSheet === self.sheet else { exit(4) }
+                        let marker = app.deletingLastPathComponent().appendingPathComponent("modal-blocked")
+                        try Data("reproduced".utf8).write(to: marker)
+                        do {
+                            UpdateRelaunch.quit()
+                            try await UpdateRelaunch.watchForFailedQuit(helper: helper, workspace: workspace,
+                                                                       timeout: args[4] == "refuse" ? 0.25 : 8)
+                            exit(5)
+                        } catch {
+                            guard args[4] == "refuse" else { exit(6) }
+                            UpdateRelaunch.requestCancellation(in: workspace)
+                            let stopDeadline = ProcessInfo.processInfo.systemUptime + 5
+                            while helper.isRunning, ProcessInfo.processInfo.systemUptime < stopDeadline {
+                                try await Task.sleep(for: .milliseconds(100))
+                            }
+                            guard !helper.isRunning else { exit(7) }
+                            try Data("recovered".utf8).write(to: app.deletingLastPathComponent().appendingPathComponent("quit-refused"))
+                            exit(0)
+                        }
+                    } catch { exit(6) }
+                }
+            }
         }
-        exit(0)
+        @main struct Host {
+            @MainActor static func main() {
+                let application = NSApplication.shared
+                application.setActivationPolicy(.regular)
+                let delegate = Delegate()
+                application.delegate = delegate
+                withExtendedLifetime(delegate) { application.run() }
+            }
+        }
         """#
         try code.write(to: hostSource, atomically: true, encoding: .utf8)
         let executable = installed.appendingPathComponent("Contents/MacOS/MacMTP")
-        try UpdateFiles.tool("/usr/bin/xcrun", ["swiftc", hostSource.path, "-o", executable.path])
+        let project = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let support = project.appendingPathComponent("Sources/UpdateSupport")
+        try UpdateFiles.tool("/usr/bin/xcrun", ["swiftc", "-parse-as-library", "-swift-version", "5",
+            "-warnings-as-errors", hostSource.path, support.appendingPathComponent("Release.swift").path,
+            support.appendingPathComponent("Relaunch.swift").path, "-o", executable.path])
         try UpdateFiles.tool("/usr/bin/codesign", ["--force", "--sign", "-", installed.path])
 
         host.executableURL = executable
-        host.arguments = [staged.path, version, token.uuidString]
+        host.arguments = [staged.path, version, token.uuidString, refuseQuit ? "refuse" : "allow"]
         try host.run()
         let deadline = ProcessInfo.processInfo.systemUptime + 70
         let rollback = canonicalRoot.appendingPathComponent(".MacMTP-update-\(token.uuidString).app")
@@ -76,8 +139,10 @@ final class UpdaterInstallationTests: XCTestCase {
         while ProcessInfo.processInfo.systemUptime < deadline {
             // Only the real helper removes this workspace, after receiving the
             // version receipt from the new app's visible main window.
-            if !host.isRunning, !manager.fileExists(atPath: workspace.path),
-               !manager.fileExists(atPath: rollback.path) {
+            let complete = refuseQuit
+                ? manager.fileExists(atPath: canonicalRoot.appendingPathComponent("quit-refused").path)
+                : !manager.fileExists(atPath: workspace.path)
+            if !host.isRunning, complete, !manager.fileExists(atPath: rollback.path) {
                 succeeded = true
                 break
             }
@@ -87,6 +152,8 @@ final class UpdaterInstallationTests: XCTestCase {
         XCTAssertTrue(succeeded, "Update must replace the exiting host, reopen the new app, and remove its rollback copy. \(error)")
         if !host.isRunning { XCTAssertEqual(host.terminationStatus, 0) }
         else { XCTFail("The update host did not exit after installer readiness.") }
-        try UpdateFiles.verifyApplication(installed, version: version)
+        XCTAssertTrue(manager.fileExists(atPath: canonicalRoot.appendingPathComponent("modal-blocked").path),
+                      "The host must first reproduce AppKit blocking quit with its update sheet open.")
+        try UpdateFiles.verifyApplication(installed, version: refuseQuit ? "1.0.0" : version)
     }
 }

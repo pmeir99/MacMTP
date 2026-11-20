@@ -49,11 +49,13 @@ body = """Native Android file transfer for Apple Silicon Macs running macOS 27 o
 
 Download **MacMTP.dmg** for installation, or unzip **MacMTP.zip** and move MacMTP.app into Applications.
 
-This update improves Finder-style browsing and stability:
-- Arrow-key selection in Icons, List, Columns, and Gallery, including left/right hierarchy navigation in Columns.
-- Inline rename with Return, Escape, and click-away completion; Space opens native Quick Look.
-- Shared thumbnails in all views, system file kinds, and a column preview with size, dates, and image dimensions when supplied by the device.
-- Correct loading placeholders, session-scoped directory caching, bounded thumbnail memory, and lower background USB traffic.
+Fixes an updater hang at “Reopening the updated MacMTP”. The app now dismisses its update sheet before quitting, checks for a failed quit, and cancels the waiting helper safely if termination is refused.
+
+Regression checks reproduce AppKit blocking termination with an open modal sheet, then verify the app quits, installs, and relaunches. A separate refusal test verifies the installed app remains unchanged and the helper exits.
+
+If an older installed version is already stuck, force quit MacMTP and install this release manually once. The old running updater cannot receive this fix until the patched app is installed.
+
+Includes the Finder-style browsing, keyboard navigation, inline rename, and native Quick Look improvements from 1.2.0.
 
 Recursive folder sizes are available under View > Calculate Folder Sizes. This is optional because scanning large trees can delay USB operations. The app does not scan the entire phone on connection.
 

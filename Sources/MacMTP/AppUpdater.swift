@@ -84,9 +84,9 @@ final class AppUpdater: ObservableObject {
         job = Task {
             let token = UUID()
             let workspace = UpdateFiles.workspace(token)
-            var handedOff = false
+            var preserveWorkspace = false
             defer {
-                if !handedOff { try? FileManager.default.removeItem(at: workspace) }
+                if !preserveWorkspace { try? FileManager.default.removeItem(at: workspace) }
                 job = nil
             }
             do {
@@ -145,10 +145,26 @@ final class AppUpdater: ObservableObject {
                     try await Task.sleep(for: .milliseconds(100))
                 }
                 phase = .installing
-                handedOff = true
-                NSApplication.shared.terminate(nil)
+                showWindow = false
+                // Let SwiftUI begin dismissing its sheet, then explicitly release
+                // any remaining AppKit modal session before requesting termination.
+                await Task.yield()
+                UpdateRelaunch.quit()
+                try await UpdateRelaunch.watchForFailedQuit(helper: process, workspace: workspace)
             } catch {
-                if helper?.isRunning == true { helper?.terminate() }
+                UpdateRelaunch.requestCancellation(in: workspace)
+                if let helper {
+                    let deadline = ProcessInfo.processInfo.systemUptime + 3
+                    while helper.isRunning && ProcessInfo.processInfo.systemUptime < deadline {
+                        try? await Task.sleep(for: .milliseconds(100))
+                    }
+                    if helper.isRunning {
+                        helper.terminate()
+                        // Keep the cancellation marker until this helper is certainly gone.
+                        preserveWorkspace = true
+                    }
+                }
+                showWindow = true
                 if Task.isCancelled || (error as? URLError)?.code == .cancelled {
                     phase = .available
                 } else {
