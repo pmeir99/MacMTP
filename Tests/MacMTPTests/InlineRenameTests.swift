@@ -47,3 +47,26 @@ final class InlineRenameTests: XCTestCase {
         XCTAssertEqual(selection, [2], "Canceling rename must restore file navigation focus.")
     }
 }
+
+extension InlineRenameTests {
+    @MainActor
+    func testClickingAwayCommitsValidNameOnlyOnce() {
+        var completions: [String?] = []
+        let coordinator = InlineFileName.Coordinator { completions.append($0) }
+        let field = NSTextField(string: "renamed.txt")
+        let notification = Notification(name: NSControl.textDidEndEditingNotification, object: field)
+        coordinator.controlTextDidEndEditing(notification)
+        coordinator.controlTextDidEndEditing(notification)
+        XCTAssertEqual(completions, ["renamed.txt"])
+    }
+
+    @MainActor
+    func testEscapeCancelsWithoutCommittingOnFocusLoss() {
+        var completions: [String?] = []
+        let coordinator = InlineFileName.Coordinator { completions.append($0) }
+        let field = NSTextField(string: "renamed.txt")
+        XCTAssertTrue(coordinator.control(field, textView: NSTextView(), doCommandBy: #selector(NSResponder.cancelOperation(_:))))
+        coordinator.controlTextDidEndEditing(Notification(name: NSControl.textDidEndEditingNotification, object: field))
+        XCTAssertEqual(completions, [nil])
+    }
+}

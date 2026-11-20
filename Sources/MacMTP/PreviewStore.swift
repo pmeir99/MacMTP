@@ -10,6 +10,8 @@ final class PreviewStore: ObservableObject {
     private let images = NSCache<NSString, NSImage>()
     private var unavailable = Set<String>()
     private var directory: URL?
+    private var localKey: String?
+    private var localURL: URL?
     @Published private(set) var generation = UUID()
 
     init() {
@@ -27,6 +29,8 @@ final class PreviewStore: ObservableObject {
         unavailable.removeAll()
         if let directory { try? FileManager.default.removeItem(at: directory) }
         directory = nil
+        localKey = nil
+        localURL = nil
     }
 
     private func key(_ entry: Entry, storage: UInt32) -> String {
@@ -89,6 +93,8 @@ final class PreviewStore: ObservableObject {
                    progress: @escaping @Sendable (TransferEvent) -> Void) async throws -> URL {
         guard !entry.folder, !entry.name.isEmpty, entry.name != ".", entry.name != "..",
               !entry.name.contains("/"), !entry.name.utf8.contains(0) else { throw DeviceError.unsafeName }
+        if let cached = cachedFile(entry, storage: storage) { return cached }
+        clearLocalFiles()
         let revision = generation
         let folder = try workspace().appendingPathComponent("QuickLook", isDirectory: true)
             .appendingPathComponent("\(storage)-\(entry.id)", isDirectory: true)
@@ -100,10 +106,20 @@ final class PreviewStore: ObservableObject {
         }
         try Task.checkCancellation()
         guard revision == generation else { throw DeviceError.unavailable }
+        localKey = key(entry, storage: storage)
+        localURL = target
         return target
     }
 
-    func clearLocalFiles() {
+    func cachedFile(_ entry: Entry, storage: UInt32) -> URL? {
+        guard localKey == key(entry, storage: storage), let localURL,
+              FileManager.default.fileExists(atPath: localURL.path) else { return nil }
+        return localURL
+    }
+
+    private func clearLocalFiles() {
+        localKey = nil
+        localURL = nil
         if let directory {
             try? FileManager.default.removeItem(at: directory.appendingPathComponent("QuickLook", isDirectory: true))
         }

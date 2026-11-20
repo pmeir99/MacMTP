@@ -347,9 +347,6 @@ struct Browser: View {
             if calculateFolderSizes && !busy { await measureFolders() }
         }
         .quickLookPreview($previewURL)
-        .onChange(of: previewURL) { _, url in
-            if url == nil { previews.clearLocalFiles() }
-        }
         .onChange(of: selection) { _, ids in
             selectionObserver?(ids)
             if ids.count == 1 { keyboardAnchor = ids.first }
@@ -743,20 +740,20 @@ struct Browser: View {
 
     private func editableName(_ item: Entry) -> some View {
         FileNameCell(entry: item, editing: $renaming) { result in
-                renaming = nil
-                fileAreaFocused = true
-                guard let result, result != item.name else { return }
-                run {
-                    try await device.rename(item, to: result)
-                    if let index = folders.firstIndex(where: { $0.id == item.id }) {
-                        folders[index] = Entry(id: item.id, name: result, folder: item.folder,
-                                               size: item.size, modified: item.modified, created: item.created,
-                                               pixelWidth: item.pixelWidth, pixelHeight: item.pixelHeight)
-                    }
-                    record("Renamed \(item.name) to \(result)")
-                    await invalidateContent()
-                    try await reload()
+            renaming = nil
+            fileAreaFocused = true
+            guard let result, result != item.name else { return }
+            run {
+                try await device.rename(item, to: result)
+                if let index = folders.firstIndex(where: { $0.id == item.id }) {
+                    folders[index] = Entry(id: item.id, name: result, folder: item.folder,
+                                           size: item.size, modified: item.modified, created: item.created,
+                                           pixelWidth: item.pixelWidth, pixelHeight: item.pixelHeight)
                 }
+                record("Renamed \(item.name) to \(result)")
+                await invalidateContent()
+                try await reload()
+            }
         }
     }
 
@@ -790,6 +787,8 @@ struct Browser: View {
         #if DEBUG
         if let testPreviewFile { previewURL = testPreviewFile; return }
         #endif
+        if let cached = previews.cachedFile(item, storage: storage) { previewURL = cached; return }
+        previewURL = nil
         run {
             let transfer = addTransfer("Preparing Quick Look")
             transfer.begin(TransferSize(bytes: UInt64(item.size), files: 1))

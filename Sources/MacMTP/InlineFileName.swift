@@ -53,14 +53,20 @@ struct InlineFileName: NSViewRepresentable {
             if selector == #selector(NSResponder.cancelOperation(_:)) { finish(nil); return true }
             if selector == #selector(NSResponder.insertNewline(_:)) {
                 let value = textView.string
-                guard !value.isEmpty, value != ".", value != "..", !value.contains("/"),
-                      !value.utf8.contains(0), value.utf16.count < 255 else { NSSound.beep(); return true }
+                guard valid(value) else { NSSound.beep(); return true }
                 finish(value)
                 return true
             }
             return false
         }
-        func controlTextDidEndEditing(_ notification: Notification) { finish(nil) }
+        private func valid(_ value: String) -> Bool {
+            !value.isEmpty && value != "." && value != ".." && !value.contains("/") &&
+                !value.utf8.contains(0) && value.utf16.count < 255
+        }
+        func controlTextDidEndEditing(_ notification: Notification) {
+            let value = (notification.object as? NSTextField)?.stringValue
+            finish(value.flatMap { valid($0) ? $0 : nil })
+        }
     }
 }
 
