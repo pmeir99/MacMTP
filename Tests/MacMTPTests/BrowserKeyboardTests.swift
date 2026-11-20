@@ -42,3 +42,37 @@ final class BrowserKeyboardTests: XCTestCase {
         }
     }
 }
+
+extension BrowserKeyboardTests {
+    @MainActor
+    func testColumnArrowsTraverseHierarchyAndReturnToSibling() async throws {
+        let application = NSApplication.shared
+        application.setActivationPolicy(.regular)
+        let first = Entry(id: 10, name: "Camera", folder: true, size: 0, modified: nil)
+        let sibling = Entry(id: 20, name: "Downloads", folder: true, size: 0, modified: nil)
+        let nested = Entry(id: 11, name: "Photos", folder: true, size: 0, modified: nil)
+        let leaf = Entry(id: 12, name: "image.jpg", folder: false, size: 1, modified: nil)
+        var selected = Set<UInt32>()
+        let browser = Browser(testEntries: [first, sibling], directories: [10: [nested], 11: [leaf], 20: []],
+                              layout: "Columns") { selected = $0 }.environmentObject(AppUpdater())
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 650),
+                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        window.contentView = NSHostingView(rootView: browser)
+        window.makeKeyAndOrderFront(nil)
+        application.activate()
+        try await Task.sleep(for: .milliseconds(350))
+        let keys: [(UInt16, UInt32)] = [(125, 10), (124, 11), (124, 12), (123, 11), (123, 10), (125, 20)]
+        for (code, expected) in keys {
+            let characters = String(UnicodeScalar(0xF700 + (code == 125 ? 1 : code == 123 ? 2 : 3))!)
+            let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero,
+                modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil, characters: characters,
+                charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code))
+            window.sendEvent(event)
+            try await Task.sleep(for: .milliseconds(200))
+            XCTAssertEqual(selected, [expected], "Column navigation must retain the active column and hierarchy")
+        }
+    }
+}

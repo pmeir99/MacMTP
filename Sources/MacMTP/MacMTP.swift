@@ -1,9 +1,7 @@
 import AppKit
 import SwiftUI
 import QuickLook
-import QuickLookThumbnailing
 import UniformTypeIdentifiers
-import ImageIO
 
 #if !arch(arm64) || !os(macOS)
 #error("MacMTP requires Apple Silicon macOS.")
@@ -37,22 +35,30 @@ struct MacMTPApp: App {
 struct Browser: View {
     private let automaticallyConnect: Bool
     private let selectionObserver: ((Set<UInt32>) -> Void)?
+    #if DEBUG
+    private let testPreviewFile: URL?
+    #endif
 
     init() {
         automaticallyConnect = true
         selectionObserver = nil
+        #if DEBUG
+        testPreviewFile = nil
+        #endif
     }
 
     #if DEBUG
-    init(testEntries: [Entry], layout name: String, selectionObserver: @escaping (Set<UInt32>) -> Void) {
+    init(testEntries: [Entry], directories: [UInt32: [Entry]] = [:], previewFile: URL? = nil, layout name: String,
+         selectionObserver: @escaping (Set<UInt32>) -> Void) {
         automaticallyConnect = false
+        testPreviewFile = previewFile
         self.selectionObserver = selectionObserver
         _storages = State(initialValue: [Storage(id: 1, name: "Test Storage")])
         _storage = State(initialValue: 1)
         var initial = DirectoryContent()
         initial.begin(parent: .max, cached: testEntries)
         _content = State(initialValue: initial)
-        _directoryCache = State(initialValue: [.max: testEntries])
+        _directoryCache = State(initialValue: directories.merging([.max: testEntries]) { _, root in root })
         _layout = AppStorage(wrappedValue: Layout(rawValue: name) ?? .list,
                              "testLayout-\(UUID().uuidString)")
     }
@@ -370,6 +376,12 @@ struct Browser: View {
                 let items = selected
                 run {
                     for item in items { try await device.remove(item); record("Deleted \(item.name)") }
+                    if let index = folders.firstIndex(where: { folder in items.contains { $0.id == folder.id } }) {
+                        folders = Array(folders.prefix(index))
+                        activeColumn = folders.count
+                        selection = []
+                        content.reset()
+                    }
                     await invalidateContent()
                     try await reload()
                 }
@@ -414,7 +426,7 @@ struct Browser: View {
                                 ForEach(items) { item in
                                     let highlighted = index < folders.count ? folders[index].id == item.id :
                                         selection.contains(item.id)
-                                    itemRow(item, highlighted: highlighted) { event in
+                                    itemRow(item, highlighted: highlighted, emphasized: index == activeColumn) { event in
                                         fileAreaFocused = true
                                         if event.clickCount == 2, !item.folder { quickLook(item) }
                                         else if index == folders.count,
@@ -544,15 +556,17 @@ struct Browser: View {
             }
     }
 
-    private func itemRow(_ item: Entry, highlighted: Bool, click: @escaping (NSEvent) -> Void) -> some View {
+    private func itemRow(_ item: Entry, highlighted: Bool, emphasized: Bool, click: @escaping (NSEvent) -> Void) -> some View {
         HStack {
             PreviewTile(entry: item, device: device, store: previews, storage: storage ?? 0, dimension: 20)
             editableName(item).lineLimit(1)
+                .foregroundStyle(highlighted && emphasized ? Color.white : Color.primary)
             Spacer()
             if item.folder { Image(systemName: "chevron.right").foregroundStyle(.secondary) }
         }
         .padding(6)
-        .background(highlighted ? Color.accentColor.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 5))
+        .background(highlighted ? (emphasized ? Color.accentColor : Color(nsColor: .unemphasizedSelectedContentBackgroundColor)) : .clear,
+                    in: RoundedRectangle(cornerRadius: 5))
         .overlay { if renaming?.id != item.id { dragSource(item, click: click) } }
         .id(item.id)
         .contextMenu { actions([item]) }
@@ -688,6 +702,15 @@ struct Browser: View {
                 Text(item.kind).foregroundStyle(.secondary)
                 Divider()
                 LabeledContent("Size", value: sizeLabel(item))
+                if let width = item.pixelWidth, let height = item.pixelHeight {
+                    LabeledContent("Dimensions", value: "\(width) × \(height)")
+                }
+                if let created = item.created {
+                    LabeledContent("Created", value: created.formatted(date: .abbreviated, time: .shortened))
+                }
+                if item.folder, let contents = directoryCache[item.id] {
+                    LabeledContent("Contains", value: "\(contents.count) items")
+                }
                 if let modified = item.modified {
                     LabeledContent("Modified", value: modified.formatted(date: .abbreviated, time: .shortened))
                 }
@@ -700,14 +723,16 @@ struct Browser: View {
 
     @ViewBuilder private func editableName(_ item: Entry) -> some View {
         if renaming?.id == item.id {
-            InlineFileName(name: item.name) { result in
+            InlineFileName(name: item.name, isFolder: item.folder) { result in
                 renaming = nil
+                fileAreaFocused = true
                 guard let result, result != item.name else { return }
                 run {
                     try await device.rename(item, to: result)
                     if let index = folders.firstIndex(where: { $0.id == item.id }) {
                         folders[index] = Entry(id: item.id, name: result, folder: item.folder,
-                                               size: item.size, modified: item.modified)
+                                               size: item.size, modified: item.modified, created: item.created,
+                                               pixelWidth: item.pixelWidth, pixelHeight: item.pixelHeight)
                     }
                     record("Renamed \(item.name) to \(result)")
                     await invalidateContent()
@@ -746,6 +771,9 @@ struct Browser: View {
 
     private func quickLook(_ item: Entry) {
         guard !busy, !item.folder, let storage else { return }
+        #if DEBUG
+        if let testPreviewFile { previewURL = testPreviewFile; return }
+        #endif
         run {
             let transfer = addTransfer("Preparing Quick Look")
             transfer.begin(TransferSize(bytes: UInt64(item.size), files: 1))
@@ -900,7 +928,16 @@ struct Browser: View {
         let requestedParent = parent
         content.begin(parent: requestedParent, cached: directoryCache[requestedParent])
         do {
-            let result = try await device.list(storage: storage, parent: requestedParent)
+            let result: [Entry]
+            #if DEBUG
+            if !automaticallyConnect {
+                result = directoryCache[requestedParent] ?? []
+            } else {
+                result = try await device.list(storage: storage, parent: requestedParent)
+            }
+            #else
+            result = try await device.list(storage: storage, parent: requestedParent)
+            #endif
             guard self.storage == storage, parent == requestedParent else { return }
             guard content.receive(result, parent: requestedParent) else { return }
             directoryCache[requestedParent] = result
@@ -1083,6 +1120,7 @@ private struct PreviewTile: View {
                 Image(nsImage: preview).resizable().scaledToFit()
             } else {
                 Image(systemName: entry.symbol)
+                    .symbolRenderingMode(.hierarchical)
                     .font(.system(size: min(dimension * 0.72, 125)))
                     .foregroundStyle(entry.folder ? Color.cyan : Color.secondary)
             }

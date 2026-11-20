@@ -12,6 +12,9 @@ struct Entry: Identifiable, Sendable {
     let folder: Bool
     let size: UInt32
     let modified: Date?
+    var created: Date? = nil
+    var pixelWidth: UInt32? = nil
+    var pixelHeight: UInt32? = nil
 }
 
 enum DeviceError: LocalizedError {
@@ -80,6 +83,25 @@ private struct Reader {
         let count = Int(try take(UInt32.self))
         guard count <= (data.count - offset) / 4 else { throw DeviceError.malformed }
         return try (0..<count).map { _ in try take() }
+    }
+}
+
+/// Decodes the fixed fields defined by the MTP ObjectInfo dataset, then its UTF-16 strings.
+enum ObjectMetadata {
+    static func decode(_ data: Data, handle: UInt32, timestamp: DateFormatter) throws -> Entry {
+        var info = Reader(data: data, offset: 4)
+        let format = try info.take(UInt16.self)
+        _ = try info.take(UInt16.self)
+        let size = try info.take(UInt32.self)
+        info.offset = 26
+        let width = try info.take(UInt32.self)
+        let height = try info.take(UInt32.self)
+        info.offset = 52
+        let name = try info.string()
+        let created = (try? info.string()).flatMap { timestamp.date(from: String($0.prefix(15))) }
+        let modified = (try? info.string()).flatMap { timestamp.date(from: String($0.prefix(15))) }
+        return Entry(id: handle, name: name, folder: format == 0x3001, size: size, modified: modified,
+                     created: created, pixelWidth: width > 0 ? width : nil, pixelHeight: height > 0 ? height : nil)
     }
 }
 
@@ -164,15 +186,7 @@ actor Device {
         var handles = Reader(data: try exchange(0x1007, [storage, 0, parent]).0)
         return try handles.handles().map { handle in
             try Task.checkCancellation()
-            var info = Reader(data: try exchange(0x1008, [handle]).0, offset: 4)
-            let format = try info.take(UInt16.self)
-            _ = try info.take(UInt16.self)
-            let size = try info.take(UInt32.self)
-            info.offset = 52
-            let name = try info.string()
-            _ = try? info.string()
-            let modified = (try? info.string()).flatMap { timestamp.date(from: String($0.prefix(15))) }
-            return Entry(id: handle, name: name, folder: format == 0x3001, size: size, modified: modified)
+            return try ObjectMetadata.decode(try exchange(0x1008, [handle]).0, handle: handle, timestamp: timestamp)
         }
     }
 

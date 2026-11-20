@@ -4,6 +4,7 @@ import SwiftUI
 /// Native field editor preserves Finder's Return-to-commit, Escape-to-cancel behavior.
 struct InlineFileName: NSViewRepresentable {
     let name: String
+    let isFolder: Bool
     let completion: (String?) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(completion) }
@@ -16,7 +17,7 @@ struct InlineFileName: NSViewRepresentable {
             guard let window = field.window else { return }
             window.makeFirstResponder(field)
             if let editor = field.currentEditor() {
-                let suffix = (name as NSString).pathExtension
+                let suffix = isFolder ? "" : (name as NSString).pathExtension
                 let length = (name as NSString).length - (suffix.isEmpty ? 0 : (suffix as NSString).length + 1)
                 editor.selectedRange = NSRange(location: 0, length: max(0, length))
             }
