@@ -177,7 +177,7 @@ struct Browser: View {
                                            description: Text(connectionMessage))
                 } else {
                     browserContent
-                        .background(FileKeyboard(handle: handleNativeKey))
+                        .background(FileKeyboard(enabled: fileAreaFocused, handle: handleNativeKey))
                         .focusable()
                         .focusEffectDisabled()
                         .focused($fileAreaFocused)
@@ -209,7 +209,7 @@ struct Browser: View {
                 Divider()
                 HStack {
                     if busy && transfers.isEmpty { ProgressView().controlSize(.small) }
-                    Text(status.isEmpty ? "\(visible.count) items" : status)
+                    Text(status.isEmpty ? (loading ? "Loading…" : "\(visible.count) items") : status)
                     Spacer()
                     Text("\(selection.count) selected")
                 }
@@ -320,6 +320,8 @@ struct Browser: View {
                             folders = []
                             activeColumn = 0
                             selection = []
+                            keyboardAnchor = nil
+                            search = ""
                             content.reset()
                         }
                         connectionMessage = DeviceError.unavailable.localizedDescription
@@ -366,6 +368,8 @@ struct Browser: View {
             folders = []
             activeColumn = 0
             selection = []
+            keyboardAnchor = nil
+            search = ""
             if storage != nil { run { try await reload() } }
         }
         .alert("New Folder", isPresented: $naming) {
@@ -432,7 +436,7 @@ struct Browser: View {
                         ScrollView {
                             LazyVStack(spacing: 2) {
                                 if index == folders.count && (loading || loadedParent != parent) {
-                                    loadingPlaceholder
+                                    loadingPlaceholder.frame(height: 140)
                                 }
                                 ForEach(items) { item in
                                     let highlighted = index < folders.count ? folders[index].id == item.id :
@@ -486,7 +490,7 @@ struct Browser: View {
                         .frame(maxWidth: .infinity, minHeight: 145)
                         .background(selection.contains(item.id) ? Color.accentColor.opacity(0.16) : .clear,
                                     in: RoundedRectangle(cornerRadius: 8))
-                        .overlay { if renaming?.id != item.id { dragSource(item) { select(item, event: $0) } } }
+                        .overlay { RenameInteraction(entry: item, editing: $renaming) { dragSource(item) { select(item, event: $0) } } }
                         .id(item.id)
                         .contextMenu { actions([item]) }
                         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
@@ -527,7 +531,7 @@ struct Browser: View {
                             .frame(width: 105, height: 94)
                             .background(selection.contains(item.id) ? Color.accentColor.opacity(0.16) : .clear,
                                         in: RoundedRectangle(cornerRadius: 8))
-                            .overlay { if renaming?.id != item.id { dragSource(item) { select(item, event: $0) } } }
+                            .overlay { RenameInteraction(entry: item, editing: $renaming) { dragSource(item) { select(item, event: $0) } } }
                             .id(item.id)
                             .contextMenu { actions([item]) }
                             .onDrop(of: [.fileURL], isTargeted: nil) { providers in
@@ -552,7 +556,7 @@ struct Browser: View {
                         editableName(item)
                     }
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .overlay { if renaming?.id != item.id { dragSource(item) { select(item, event: $0) } } }
+                        .overlay { RenameInteraction(entry: item, editing: $renaming) { dragSource(item) { select(item, event: $0) } } }
                         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
                             receiveDrop(providers, to: item.folder ? item.id : parent)
                         }
@@ -583,7 +587,7 @@ struct Browser: View {
         .padding(6)
         .background(highlighted ? (emphasized ? Color.accentColor : Color(nsColor: .unemphasizedSelectedContentBackgroundColor)) : .clear,
                     in: RoundedRectangle(cornerRadius: 5))
-        .overlay { if renaming?.id != item.id { dragSource(item, click: click) } }
+        .overlay { RenameInteraction(entry: item, editing: $renaming) { dragSource(item, click: click) } }
         .id(item.id)
         .contextMenu { actions([item]) }
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
@@ -737,9 +741,8 @@ struct Browser: View {
         }
     }
 
-    @ViewBuilder private func editableName(_ item: Entry) -> some View {
-        if renaming?.id == item.id {
-            InlineFileName(name: item.name, isFolder: item.folder) { result in
+    private func editableName(_ item: Entry) -> some View {
+        FileNameCell(entry: item, editing: $renaming) { result in
                 renaming = nil
                 fileAreaFocused = true
                 guard let result, result != item.name else { return }
@@ -754,9 +757,6 @@ struct Browser: View {
                     await invalidateContent()
                     try await reload()
                 }
-            }
-        } else {
-            Text(item.name)
         }
     }
 
@@ -804,6 +804,7 @@ struct Browser: View {
     }
 
     private func handleNativeKey(_ event: NSEvent) -> Bool {
+        guard [UInt16(123), 124, 125, 126, 36, 49].contains(event.keyCode) else { return false }
         // FileDrag owns mouse interaction; return keyboard focus to the SwiftUI file area.
         fileAreaFocused = true
         return navigateKey(code: event.keyCode, shift: event.modifierFlags.contains(.shift),
@@ -995,6 +996,11 @@ struct Browser: View {
     }
 
     private func reconnect() async throws {
+        folders = []
+        activeColumn = 0
+        selection = []
+        keyboardAnchor = nil
+        search = ""
         previews.reset()
         directoryCache = [:]
         folderSizes = [:]

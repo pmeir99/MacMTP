@@ -4,13 +4,15 @@ import SwiftUI
 /// Native tables consume Return before a parent SwiftUI key handler can see it.
 /// Intercept file commands only inside this file area's key window, never in text editors or the sidebar.
 struct FileKeyboard: NSViewRepresentable {
+    let enabled: Bool
     let handle: (NSEvent) -> Bool
 
     func makeNSView(context: Context) -> Area { Area() }
-    func updateNSView(_ view: Area, context: Context) { view.handle = handle }
+    func updateNSView(_ view: Area, context: Context) { view.handle = handle; view.enabled = enabled }
     static func dismantleNSView(_ view: Area, coordinator: ()) { view.stop() }
 
     final class Area: NSView {
+        var enabled = false
         var handle: ((NSEvent) -> Bool)?
         private var monitor: Any?
 
@@ -21,11 +23,14 @@ struct FileKeyboard: NSViewRepresentable {
             monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
                 guard let self, let window = self.window, window.isKeyWindow,
                       event.window === window, let responder = window.firstResponder,
-                      !(responder is NSTextView), !(responder is NSTextField),
-                      let focused = responder as? NSView else { return event }
-                let area = self.convert(self.bounds, to: nil)
-                let rect = focused.convert(focused.bounds, to: nil)
-                guard area.contains(NSPoint(x: rect.midX, y: rect.midY)) else { return event }
+                      !(responder is NSTextView), !(responder is NSTextField) else { return event }
+                var inFileArea = self.enabled
+                if let focused = responder as? NSView, !focused.bounds.isEmpty {
+                    let area = self.convert(self.bounds, to: nil)
+                    let rect = focused.convert(focused.bounds, to: nil)
+                    inFileArea = area.contains(NSPoint(x: rect.midX, y: rect.midY))
+                }
+                guard inFileArea else { return event }
                 return self.handle?(event) == true ? nil : event
             }
         }

@@ -76,3 +76,43 @@ extension BrowserKeyboardTests {
         }
     }
 }
+
+extension BrowserKeyboardTests {
+    @MainActor
+    func testFileCommandsDoNotCaptureOtherControls() async throws {
+        let application = NSApplication.shared
+        application.setActivationPolicy(.regular)
+        let entry = Entry(id: 1, name: "file.txt", folder: false, size: 1, modified: nil)
+        var selection = Set<UInt32>()
+        let browser = Browser(testEntries: [entry], layout: "List") { selection = $0 }.environmentObject(AppUpdater())
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 650),
+                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 1100, height: 650))
+        let host = NSHostingView(rootView: browser)
+        host.frame = NSRect(x: 200, y: 0, width: 900, height: 650)
+        let other = OtherControl(frame: NSRect(x: 0, y: 0, width: 180, height: 650))
+        container.addSubview(host)
+        container.addSubview(other)
+        window.contentView = container
+        window.makeKeyAndOrderFront(nil)
+        application.activate()
+        try await Task.sleep(for: .milliseconds(350))
+        window.makeFirstResponder(other)
+        let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero,
+            modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber, context: nil, characters: "\u{F701}",
+            charactersIgnoringModifiers: "\u{F701}", isARepeat: false, keyCode: 125))
+        application.sendEvent(event)
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(other.received, 1)
+        XCTAssertTrue(selection.isEmpty, "Sidebar and other controls must retain their own keyboard behavior.")
+    }
+
+    private final class OtherControl: NSView {
+        var received = 0
+        override var acceptsFirstResponder: Bool { true }
+        override func keyDown(with event: NSEvent) { received += 1 }
+    }
+}

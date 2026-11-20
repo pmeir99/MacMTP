@@ -63,3 +63,34 @@ struct InlineFileName: NSViewRepresentable {
         func controlTextDidEndEditing(_ notification: Notification) { finish(nil) }
     }
 }
+
+/// Bind directly inside the table cell so AppKit's reused row hosts observe editing changes.
+struct FileNameCell: View {
+    let entry: Entry
+    @Binding var editing: Entry?
+    let completion: (String?) -> Void
+
+    var body: some View {
+        if editing?.id == entry.id {
+            InlineFileName(name: entry.name, isFolder: entry.folder, completion: completion)
+        } else {
+            Text(entry.name)
+        }
+    }
+}
+
+struct RenameInteraction<Content: View>: View {
+    let entry: Entry
+    @Binding var editing: Entry?
+    let content: () -> Content
+
+    init(entry: Entry, editing: Binding<Entry?>, @ViewBuilder content: @escaping () -> Content) {
+        self.entry = entry
+        _editing = editing
+        self.content = content
+    }
+
+    var body: some View {
+        if editing?.id != entry.id { content() }
+    }
+}
