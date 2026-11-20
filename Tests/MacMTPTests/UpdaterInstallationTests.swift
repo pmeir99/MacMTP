@@ -125,7 +125,7 @@ final class UpdaterInstallationTests: XCTestCase {
         let project = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
         let support = project.appendingPathComponent("Sources/UpdateSupport")
-        try UpdateFiles.tool("/usr/bin/xcrun", ["swiftc", "-parse-as-library", "-swift-version", "5",
+        try UpdateFiles.tool("/usr/bin/xcrun", ["swiftc", "-parse-as-library", "-swift-version", "5", "-target", "arm64-apple-macos27.0",
             "-warnings-as-errors", hostSource.path, support.appendingPathComponent("Release.swift").path,
             support.appendingPathComponent("Relaunch.swift").path, "-o", executable.path])
         try UpdateFiles.tool("/usr/bin/codesign", ["--force", "--sign", "-", installed.path])
