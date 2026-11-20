@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import QuickLookUI
 import QuickLookThumbnailing
 import UniformTypeIdentifiers
 import ImageIO
@@ -39,6 +40,16 @@ private struct Browser: View {
         case name = "Name", kind = "Kind", size = "Size", modified = "Date Modified"
     }
 
+    @StateObject private var previews = PreviewStore()
+    @State private var previewURL: URL?
+    @State private var loading = false
+    @State private var loadedParent: UInt32?
+    @State private var keyboardAnchor: UInt32?
+    @State private var gridColumns = 1
+    @State private var activeColumn = 0
+    @State private var renameRequest: Task<Void, Never>?
+    @FocusState private var fileAreaFocused: Bool
+    @AppStorage("calculateFolderSizes") private var calculateFolderSizes = false
     @State private var sort: Sort = .name
     @State private var device = Device()
     @State private var usbRecovery = USBRecovery()
@@ -84,7 +95,11 @@ private struct Browser: View {
     @State private var showHistory = false
 
     private var parent: UInt32 { folders.last?.id ?? UInt32.max }
-    private var selected: [Entry] { entries.filter { selection.contains($0.id) } }
+    private var selected: [Entry] {
+        var seen = Set<UInt32>()
+        return (entries + folders + directoryCache.values.flatMap { $0 })
+            .filter { selection.contains($0.id) && seen.insert($0.id).inserted }
+    }
     private var visible: [Entry] {
         entries.filter {
             (showHidden || !$0.name.hasPrefix(".")) &&
@@ -123,6 +138,12 @@ private struct Browser: View {
                                            description: Text(connectionMessage))
                 } else {
                     browserContent
+                        .focusable()
+                        .focusEffectDisabled()
+                        .focused($fileAreaFocused)
+                        .onKeyPress(phases: [.down, .repeat]) { press in
+                            handleKey(press)
+                        }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .contentShape(Rectangle())
                         .overlay {
@@ -162,7 +183,8 @@ private struct Browser: View {
                 Form {
                     if selected.count == 1, let item = selected.first {
                         LabeledContent("Name", value: item.name)
-                        LabeledContent("Kind", value: item.folder ? "Folder" : "File")
+                        PreviewTile(entry: item, device: device, store: previews, storage: storage ?? 0, dimension: 180)
+                        LabeledContent("Kind", value: item.kind)
                         if let modified = item.modified {
                             LabeledContent("Modified", value: modified.formatted(date: .abbreviated, time: .shortened))
                         }
@@ -174,8 +196,7 @@ private struct Browser: View {
             }
             .toolbar {
                 Button("Back", systemImage: "chevron.left") {
-                    folders.removeLast()
-                    run { try await reload() }
+                    goBack()
                 }.help("Go to the enclosing folder").disabled(busy || folders.isEmpty)
                 Button("Refresh", systemImage: "arrow.clockwise") { run { try await reconnect() } }.help("Refresh the device connection").disabled(busy)
                 Button("Upload", systemImage: "square.and.arrow.up") { chooseUpload() }.help("Copy files or folders to Android").disabled(busy || storage == nil)
@@ -201,6 +222,8 @@ private struct Browser: View {
                     }
                     Toggle("Hidden Files", isOn: $showHidden)
                     Toggle("Inspector", isOn: $inspector)
+                    Toggle("Calculate Folder Sizes", isOn: $calculateFolderSizes)
+                        .help("Calculate recursive sizes while idle. Large directory trees can take time over USB.")
                     Button("Recent Activity") { showHistory = true }
                     Divider()
                     Toggle("Automatic USB Recovery on Launch", isOn: $automaticUSBRecovery)
@@ -223,7 +246,10 @@ private struct Browser: View {
             let connectedDevice = device
             updater.prepareForRelaunch = { await connectedDevice.disconnect() }
         }
-        .onChange(of: busy, initial: true) { _, value in updater.blockedByTransfer = value }
+        .onChange(of: busy, initial: true) { _, value in
+            updater.blockedByTransfer = value
+            previews.suspended = value
+        }
         .task {
             if !startupRecoveryDone {
                 startupRecoveryDone = true
@@ -259,24 +285,36 @@ private struct Browser: View {
                 do { try await Task.sleep(for: .seconds(6)) } catch { return }
             }
         }
-        .task(id: listingVersion) { await measureFolders() }
+        .task(id: "\(listingVersion)-\(calculateFolderSizes)") {
+            if calculateFolderSizes { await measureFolders() }
+        }
+        .quickLookPreview($previewURL)
+        .onChange(of: layout) {
+            activeColumn = folders.count
+            renaming = nil
+            selection = []
+            keyboardAnchor = nil
+        }
         .onChange(of: storage) {
+            previews.reset()
+            loadedParent = nil
             directoryCache = [:]
             folderSizes = [:]
             folders = []
+            activeColumn = 0
             entries = []
             selection = []
             if storage != nil { run { try await reload() } }
         }
-        .alert(renaming == nil ? "New Folder" : "Rename Item", isPresented: $naming) {
+        .alert("New Folder", isPresented: $naming) {
             TextField("Name", text: $name)
             Button("Cancel", role: .cancel) {}
             Button("Save") {
                 guard let storage else { return }
                 run {
-                    if let renaming { try await device.rename(renaming, to: name) }
-                    else { try await device.makeFolder(name, storage: storage, parent: parent) }
-                    record(renaming == nil ? "Created folder \(name)" : "Renamed item to \(name)")
+                    try await device.makeFolder(name, storage: storage, parent: parent)
+                    record("Created folder \(name)")
+                    await invalidateContent()
                     try await reload()
                 }
             }.disabled(name.isEmpty)
@@ -286,6 +324,7 @@ private struct Browser: View {
                 let items = selected
                 run {
                     for item in items { try await device.remove(item); record("Deleted \(item.name)") }
+                    await invalidateContent()
                     try await reload()
                 }
             }
@@ -309,49 +348,60 @@ private struct Browser: View {
                     ForEach(0...folders.count, id: \.self) { index in
                         let container = index == 0 ? UInt32.max : folders[index - 1].id
                         let items = index == folders.count ? visible :
-                            (directoryCache[container] ?? []).filter { showHidden || !$0.name.hasPrefix(".") }
-                                .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+                            sortedItems(directoryCache[container] ?? [])
+                        ScrollViewReader { reader in
                         ScrollView {
                             LazyVStack(spacing: 2) {
+                                if index == folders.count && (loading || loadedParent != parent) {
+                                    loadingPlaceholder
+                                }
                                 ForEach(items) { item in
                                     let highlighted = index < folders.count ? folders[index].id == item.id :
                                         selection.contains(item.id)
                                     itemRow(item, highlighted: highlighted) { event in
-                                        if item.folder, !busy {
-                                            folders = Array(folders.prefix(index)) + [item]
-                                            selection = []
-                                            run { try await reload() }
-                                        } else if index == folders.count {
-                                            select(item, event: event)
-                                        }
+                                        fileAreaFocused = true
+                                        if event.clickCount == 2, !item.folder { quickLook(item) }
+                                        else { columnSelect(item, index: index) }
                                     }
                                 }
                             }.padding(6)
                         }
+                        .onChange(of: selection) { _, ids in
+                            if index == folders.count, let id = ids.first { reader.scrollTo(id) }
+                        }
+                        }
                         .frame(width: 225)
                         Divider()
+                    }
+                    if let item = selected.first {
+                        previewDetails(item).frame(width: 260)
                     }
                 }
                 .scrollTargetLayout()
             }
             .defaultScrollAnchor(.trailing, for: .sizeChanges)
+        } else if loading || loadedParent != parent {
+            loadingPlaceholder
         } else if visible.isEmpty {
             ContentUnavailableView(search.isEmpty ? "Empty Folder" : "No Results",
                                    systemImage: search.isEmpty ? "folder" : "magnifyingglass")
         } else if layout == .icons {
+            GeometryReader { geometry in
+            ScrollViewReader { reader in
             ScrollView {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 130))], spacing: 16) {
                     ForEach(visible) { item in
                         VStack(spacing: 6) {
-                            PreviewTile(entry: item, device: device, dimension: 96)
-                                .id(listingVersion)
-                            Text(item.name).lineLimit(2).multilineTextAlignment(.center)
+                            PreviewTile(entry: item, device: device, store: previews, storage: storage ?? 0, dimension: 96)
+
+                            editableName(item).lineLimit(2).multilineTextAlignment(.center)
                             Text(sizeLabel(item)).font(.caption).foregroundStyle(.secondary)
                         }
                         .frame(maxWidth: .infinity, minHeight: 145)
                         .background(selection.contains(item.id) ? Color.accentColor.opacity(0.16) : .clear,
                                     in: RoundedRectangle(cornerRadius: 8))
-                        .overlay { dragSource(item) { select(item, event: $0) } }
+                        .overlay { if renaming?.id != item.id { dragSource(item) { select(item, event: $0) } } }
+                        .id(item.id)
                         .contextMenu { actions([item]) }
                         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
                             receiveDrop(providers, to: item.folder ? item.id : parent)
@@ -359,28 +409,38 @@ private struct Browser: View {
                     }
                 }.padding(18)
             }
+            .onChange(of: selection) { _, ids in
+                if let id = ids.first { reader.scrollTo(id) }
+            }
+            .onChange(of: geometry.size.width, initial: true) { _, width in
+                gridColumns = max(1, Int((width - 36 + 8) / 138))
+            }
+            }
+            }
         } else if layout == .gallery {
             VStack(spacing: 10) {
                 if let item = selected.first ?? visible.first {
-                    PreviewTile(entry: item, device: device, dimension: 360)
-                        .id(listingVersion)
+                    PreviewTile(entry: item, device: device, store: previews, storage: storage ?? 0, dimension: 360)
+
                         .frame(maxHeight: .infinity)
                     Text(item.name).font(.headline)
-                    Text(sizeLabel(item)).foregroundStyle(.secondary)
+                    Text("\(item.kind) · \(sizeLabel(item))").foregroundStyle(.secondary)
                 }
                 Divider()
+                ScrollViewReader { reader in
                 ScrollView(.horizontal) {
                     LazyHStack(spacing: 8) {
                         ForEach(visible) { item in
                             VStack {
-                                PreviewTile(entry: item, device: device, dimension: 65)
-                                    .id(listingVersion)
-                                Text(item.name).lineLimit(1).font(.caption)
+                                PreviewTile(entry: item, device: device, store: previews, storage: storage ?? 0, dimension: 65)
+    
+                                editableName(item).lineLimit(1).font(.caption)
                             }
                             .frame(width: 105, height: 94)
                             .background(selection.contains(item.id) ? Color.accentColor.opacity(0.16) : .clear,
                                         in: RoundedRectangle(cornerRadius: 8))
-                            .overlay { dragSource(item) { select(item, event: $0) } }
+                            .overlay { if renaming?.id != item.id { dragSource(item) { select(item, event: $0) } } }
+                            .id(item.id)
                             .contextMenu { actions([item]) }
                             .onDrop(of: [.fileURL], isTargeted: nil) { providers in
                                 receiveDrop(providers, to: item.folder ? item.id : parent)
@@ -388,13 +448,21 @@ private struct Browser: View {
                         }
                     }.padding(.horizontal, 10)
                 }.frame(height: 108)
+                .onChange(of: selection) { _, ids in
+                    if let id = ids.first { reader.scrollTo(id) }
+                }
+                }
             }.padding(.top, 12)
         } else {
+            ScrollViewReader { reader in
             Table(visible, selection: $selection) {
                 TableColumn("Name") { item in
-                    Label(item.name, systemImage: item.folder ? "folder.fill" : "doc")
+                    HStack(spacing: 6) {
+                        PreviewTile(entry: item, device: device, store: previews, storage: storage ?? 0, dimension: 20)
+                        editableName(item)
+                    }
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .overlay { dragSource(item) { select(item, event: $0) } }
+                        .overlay { if renaming?.id != item.id { dragSource(item) { select(item, event: $0) } } }
                         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
                             receiveDrop(providers, to: item.folder ? item.id : parent)
                         }
@@ -402,25 +470,30 @@ private struct Browser: View {
                 TableColumn("Date Modified") { item in
                     Text(item.modified?.formatted(date: .abbreviated, time: .shortened) ?? "—")
                 }
-                TableColumn("Kind") { item in Text(item.folder ? "Folder" : "File") }
+                TableColumn("Kind") { item in Text(item.kind) }
                 TableColumn("Size") { item in Text(sizeLabel(item)) }
             }
             .contextMenu(forSelectionType: UInt32.self) { ids in
                 actions(entries.filter { ids.contains($0.id) })
+            }
+            .onChange(of: selection) { _, ids in
+                if let id = keyboardAnchor, ids.contains(id) { reader.scrollTo(id) }
+            }
             }
         }
     }
 
     private func itemRow(_ item: Entry, highlighted: Bool, click: @escaping (NSEvent) -> Void) -> some View {
         HStack {
-            Label(item.name, systemImage: item.folder ? "folder.fill" : "doc")
-                .lineLimit(1)
+            PreviewTile(entry: item, device: device, store: previews, storage: storage ?? 0, dimension: 20)
+            editableName(item).lineLimit(1)
             Spacer()
             if item.folder { Image(systemName: "chevron.right").foregroundStyle(.secondary) }
         }
         .padding(6)
         .background(highlighted ? Color.accentColor.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 5))
-        .overlay { dragSource(item, click: click) }
+        .overlay { if renaming?.id != item.id { dragSource(item, click: click) } }
+        .id(item.id)
         .contextMenu { actions([item]) }
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
             guard item.folder else { return false }
@@ -430,7 +503,11 @@ private struct Browser: View {
 
     private func dragSource(_ item: Entry, click: @escaping (NSEvent) -> Void) -> some View {
         let storageID = storage
-        return FileDrag(symbol: item.folder ? "folder.fill" : "doc", title: item.name, click: click) {
+        return FileDrag(symbol: item.symbol, title: item.name, nameArea: layout == .icons || layout == .gallery,
+                        nameClick: { scheduleRename(item) }, key: handleNativeKey, click: { event in
+            if event.clickCount > 1 { renameRequest?.cancel() }
+            click(event)
+        }) {
             guard storageID != nil, !busy else { return [] }
             return selection.contains(item.id) ? selected : [item]
         } export: { entry, destination in
@@ -459,8 +536,10 @@ private struct Browser: View {
     }
 
     private func select(_ item: Entry, event: NSEvent) {
-        if event.clickCount == 2, item.folder {
-            open(item)
+        fileAreaFocused = true
+        keyboardAnchor = item.id
+        if event.clickCount == 2 {
+            if item.folder { open(item) } else { quickLook(item) }
         } else if event.modifierFlags.contains(.command) {
             if selection.contains(item.id) { selection.remove(item.id) }
             else { selection.insert(item.id) }
@@ -486,6 +565,7 @@ private struct Browser: View {
     private func measureFolders() async {
         guard let storage else { return }
         let revision = listingVersion
+        do { try await Task.sleep(for: .seconds(2)) } catch { return }
         for item in entries where item.folder {
             var remaining = [item.id]
             var visited = Set<UInt32>()
@@ -493,7 +573,7 @@ private struct Browser: View {
             do {
                 while let handle = remaining.popLast() {
                     try Task.checkCancellation()
-                    guard revision == listingVersion, self.storage == storage else { return }
+                    guard !busy, revision == listingVersion, self.storage == storage else { return }
                     guard visited.insert(handle).inserted else { continue }
                     let children = try await device.list(storage: storage, parent: handle)
                     for child in children {
@@ -516,7 +596,8 @@ private struct Browser: View {
     @ViewBuilder private func actions(_ items: [Entry]) -> some View {
         if let item = items.first, items.count == 1 {
             if item.folder { Button("Open") { open(item) }.disabled(busy) }
-            Button("Rename") { renaming = item; name = item.name; naming = true }.disabled(busy)
+            Button("Rename") { beginRename(item) }.disabled(busy)
+            Button("Quick Look") { quickLook(item) }.disabled(busy || item.folder)
             Button("Get Info") { selection = [item.id]; inspector = true }
         }
         if !items.isEmpty {
@@ -528,26 +609,244 @@ private struct Browser: View {
         }
     }
 
+    private var loadingPlaceholder: some View {
+        VStack(spacing: 10) {
+            ProgressView().controlSize(.small)
+            Text("Loading…").foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, minHeight: 100, maxHeight: .infinity)
+        .accessibilityLabel("Loading folder contents")
+    }
+
+    private func previewDetails(_ item: Entry) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                PreviewTile(entry: item, device: device, store: previews, storage: storage ?? 0, dimension: 220)
+                    .frame(maxWidth: .infinity)
+                Text(item.name).font(.headline).textSelection(.enabled)
+                Text(item.kind).foregroundStyle(.secondary)
+                Divider()
+                LabeledContent("Size", value: sizeLabel(item))
+                if let modified = item.modified {
+                    LabeledContent("Modified", value: modified.formatted(date: .abbreviated, time: .shortened))
+                }
+                if !item.folder {
+                    Button("Quick Look", systemImage: "eye") { quickLook(item) }.disabled(busy)
+                }
+            }.padding(16)
+        }
+    }
+
+    @ViewBuilder private func editableName(_ item: Entry) -> some View {
+        if renaming?.id == item.id {
+            InlineFileName(name: item.name) { result in
+                renaming = nil
+                guard let result, result != item.name else { return }
+                run {
+                    try await device.rename(item, to: result)
+                    if let index = folders.firstIndex(where: { $0.id == item.id }) {
+                        folders[index] = Entry(id: item.id, name: result, folder: item.folder,
+                                               size: item.size, modified: item.modified)
+                    }
+                    record("Renamed \(item.name) to \(result)")
+                    await invalidateContent()
+                    try await reload()
+                }
+            }
+        } else {
+            Text(item.name)
+        }
+    }
+
+    private func scheduleRename(_ item: Entry) {
+        renameRequest?.cancel()
+        guard selection == [item.id], !busy else { return }
+        let directory = parent
+        renameRequest = Task { @MainActor in
+            do { try await Task.sleep(for: .milliseconds(650)) } catch { return }
+            guard selection == [item.id], parent == directory, !busy else { return }
+            beginRename(item)
+        }
+    }
+
+    private func beginRename(_ item: Entry) {
+        guard !busy else { return }
+        selection = [item.id]
+        renaming = item
+    }
+
+    private func invalidateContent() async {
+        directoryCache = [:]
+        folderSizes = [:]
+        previews.reset()
+        await device.invalidateDirectories()
+    }
+
+    private func quickLook(_ item: Entry) {
+        guard !busy, !item.folder, let storage else { return }
+        run {
+            let transfer = addTransfer("Preparing Quick Look")
+            transfer.begin(TransferSize(bytes: UInt64(item.size), files: 1))
+            do {
+                previewURL = try await previews.localFile(item, storage: storage, device: device) { transfer.update($0) }
+                transfer.finish()
+            } catch {
+                transfer.finish(error: error)
+                throw error
+            }
+        }
+    }
+
+    private func handleNativeKey(_ event: NSEvent) -> Bool {
+        // FileDrag owns mouse interaction; return keyboard focus to the SwiftUI file area.
+        fileAreaFocused = true
+        return navigateKey(code: event.keyCode, shift: event.modifierFlags.contains(.shift),
+                           command: event.modifierFlags.contains(.command))
+    }
+
+    private func handleKey(_ press: KeyPress) -> KeyPress.Result {
+        let code: UInt16
+        switch press.key {
+        case .upArrow: code = 126
+        case .downArrow: code = 125
+        case .leftArrow: code = 123
+        case .rightArrow: code = 124
+        case .return: code = 36
+        case .space: code = 49
+        default: return .ignored
+        }
+        return navigateKey(code: code, shift: press.modifiers.contains(.shift),
+                           command: press.modifiers.contains(.command)) ? .handled : .ignored
+    }
+
+    private func navigateKey(code: UInt16, shift: Bool, command: Bool) -> Bool {
+        renameRequest?.cancel()
+        guard renaming == nil else { return false }
+        guard [123, 124, 125, 126, 36, 49].contains(code) else { return false }
+        guard !busy else { return true }
+        if code == 49 {
+            if previewURL != nil { previewURL = nil }
+            else if let item = selected.first { quickLook(item) }
+            return true
+        }
+        if code == 36 {
+            if let item = selected.first { beginRename(item) }
+            return true
+        }
+        if command && code == 126 { goBack(); return true }
+        if command && code == 125 {
+            if let item = selected.first, item.folder { open(item) }
+            return true
+        }
+        if layout == .columns {
+            let index = min(activeColumn, folders.count)
+            if code == 123 {
+                guard index > 0 else { return true }
+                activeColumn = index - 1
+                selection = [folders[index - 1].id]
+                keyboardAnchor = folders[index - 1].id
+                return true
+            }
+            if code == 124 {
+                if index < folders.count {
+                    activeColumn = index + 1
+                    let container = folders[index].id
+                    if let first = sortedItems(directoryCache[container] ?? []).first {
+                        columnSelect(first, index: index + 1)
+                    }
+                } else if let item = selected.first, item.folder { columnSelect(item, index: index) }
+                return true
+            }
+            let container = index == 0 ? UInt32.max : folders[index - 1].id
+            let items = index == folders.count ? visible : sortedItems(directoryCache[container] ?? [])
+            let current = index < folders.count ? folders[index].id : keyboardAnchor ?? selection.first
+            if let id = FileNavigation.destination(ids: items.map(\.id), selected: current, delta: code == 126 ? -1 : 1),
+               let item = items.first(where: { $0.id == id }) { columnSelect(item, index: index) }
+            return true
+        }
+        let delta: Int
+        if code == 126 { delta = layout == .icons ? -gridColumns : -1 }
+        else if code == 125 { delta = layout == .icons ? gridColumns : 1 }
+        else if layout == .icons || layout == .gallery { delta = code == 123 ? -1 : 1 }
+        else { return false }
+        if let id = FileNavigation.destination(ids: visible.map(\.id), selected: keyboardAnchor ?? selection.first, delta: delta) {
+            if shift { selection.insert(id) } else { selection = [id] }
+            keyboardAnchor = id
+        }
+        return true
+    }
+
+    private func sortedItems(_ items: [Entry]) -> [Entry] {
+        items.filter { showHidden || !$0.name.hasPrefix(".") }
+            .sorted { lhs, rhs in
+                if lhs.folder != rhs.folder { return lhs.folder }
+                return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+            }
+    }
+
+    private func columnSelect(_ item: Entry, index: Int) {
+        guard !busy else { return }
+        if item.folder {
+            navigate(to: Array(folders.prefix(index)) + [item], activeAt: index)
+            selection = [item.id]
+        } else {
+            if index < folders.count {
+                navigate(to: Array(folders.prefix(index)), selecting: item.id, activeAt: index)
+            } else {
+                selection = [item.id]
+                keyboardAnchor = item.id
+                activeColumn = index
+            }
+        }
+    }
+
     private func open(_ entry: Entry) {
         guard entry.folder, !busy else { return }
-        folders.append(entry)
-        selection = []
+        navigate(to: folders + [entry])
+    }
+
+    private func navigate(to path: [Entry], selecting id: UInt32? = nil, activeAt: Int? = nil) {
+        guard !busy else { return }
+        renameRequest?.cancel()
+        renaming = nil
+        folders = path
+        activeColumn = activeAt ?? path.count
+        selection = id.map { [$0] } ?? []
+        keyboardAnchor = id
+        search = ""
+        entries = directoryCache[parent] ?? []
+        loadedParent = directoryCache[parent] == nil ? nil : parent
+        listingVersion += 1 // Cancels recursive size work before issuing navigation I/O.
         run { try await reload() }
+    }
+
+    private func goBack() {
+        guard let folder = folders.last else { return }
+        navigate(to: Array(folders.dropLast()), selecting: folder.id)
     }
 
     private func reload() async throws {
         guard let storage else { return }
+        let requestedParent = parent
+        loading = loadedParent != requestedParent
+        if loading { entries = [] }
+        defer { loading = false }
         do {
-            entries = try await device.list(storage: storage, parent: parent)
-            directoryCache[parent] = entries
-            folderSizes = [:]
+            let result = try await device.list(storage: storage, parent: requestedParent)
+            guard self.storage == storage, parent == requestedParent else { return }
+            entries = result
+            loadedParent = requestedParent
+            directoryCache[requestedParent] = result
             listingVersion += 1
         } catch {
             entries = []
             selection = []
+            loadedParent = requestedParent
             throw error
         }
-        selection.formIntersection(entries.map(\.id))
+        if layout != .columns || activeColumn == folders.count {
+            selection.formIntersection(entries.map(\.id))
+        }
     }
 
     private func recoverUSBConnection() async throws {
@@ -570,6 +869,10 @@ private struct Browser: View {
     }
 
     private func reconnect() async throws {
+        previews.reset()
+        directoryCache = [:]
+        folderSizes = [:]
+        loadedParent = nil
         await device.disconnect()
         storages = try await device.connect()
         if !storages.contains(where: { $0.id == storage }) { storage = storages.first?.id }
@@ -636,6 +939,7 @@ private struct Browser: View {
                 throw error
             }
             transfer.finish()
+            await invalidateContent()
             try await reload()
         }
         return true
@@ -694,6 +998,8 @@ private struct Browser: View {
 private struct PreviewTile: View {
     let entry: Entry
     let device: Device
+    @ObservedObject var store: PreviewStore
+    let storage: UInt32
     let dimension: CGFloat
     @State private var preview: NSImage?
 
@@ -702,47 +1008,17 @@ private struct PreviewTile: View {
             if let preview {
                 Image(nsImage: preview).resizable().scaledToFit()
             } else {
-                Image(systemName: entry.folder ? "folder.fill" : "doc")
-                    .font(.system(size: min(dimension * 0.52, 125)))
-                    .foregroundStyle(entry.folder ? Color.accentColor : Color.secondary)
+                Image(systemName: entry.symbol)
+                    .font(.system(size: min(dimension * 0.72, 125)))
+                    .foregroundStyle(entry.folder ? Color.cyan : Color.secondary)
             }
         }
         .frame(width: dimension, height: dimension)
-        .help(entry.name)
-        .task(id: entry.id) { await load() }
-    }
-
-    private func load() async {
-        preview = nil
-        guard !entry.folder,
-              let type = UTType(filenameExtension: (entry.name as NSString).pathExtension),
-              type.conforms(to: .image) || type.conforms(to: .movie) else { return }
-        do {
-            try Task.checkCancellation()
-            let data = try await device.thumbnail(entry)
-            try Task.checkCancellation()
-            guard !data.isEmpty else { return }
-            if let source = CGImageSourceCreateWithData(data as CFData, nil),
-               let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceThumbnailMaxPixelSize: 720
-               ] as CFDictionary) {
-                preview = NSImage(cgImage: image, size: .zero)
-            } else if type.conforms(to: .movie) {
-                let suffix = type.preferredFilenameExtension ?? "mov"
-                let url = FileManager.default.temporaryDirectory
-                    .appendingPathComponent(UUID().uuidString).appendingPathExtension(suffix)
-                defer { try? FileManager.default.removeItem(at: url) }
-                try data.write(to: url)
-                let request = QLThumbnailGenerator.Request(fileAt: url, size: CGSize(width: 720, height: 720),
-                                                           scale: 1, representationTypes: .thumbnail)
-                let result = try await QLThumbnailGenerator.shared.generateBestRepresentation(for: request)
-                try Task.checkCancellation()
-                preview = result.nsImage
-            }
-        } catch {
-            // Keep the system symbol when the device or Quick Look cannot preview the file.
+        .help("\(entry.name) — \(entry.kind)")
+        .task(id: "\(storage)-\(entry.id)-\(entry.name)-\(entry.size)") {
+            preview = nil
+            guard !entry.folder else { return }
+            preview = await store.image(entry, storage: storage, device: device)
         }
     }
 }

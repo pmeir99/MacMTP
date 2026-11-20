@@ -40,6 +40,9 @@ private final class ExportPromise: NSFilePromiseProvider, NSFilePromiseProviderD
 struct FileDrag: NSViewRepresentable {
     let symbol: String
     let title: String
+    let nameArea: Bool
+    let nameClick: () -> Void
+    let key: (NSEvent) -> Bool
     let click: (NSEvent) -> Void
     let entries: () -> [Entry]
     let export: (Entry, URL) async throws -> Void
@@ -55,12 +58,25 @@ struct FileDrag: NSViewRepresentable {
         var configuration: FileDrag?
         private var origin: NSPoint?
 
-        override func mouseDown(with event: NSEvent) { origin = event.locationInWindow }
+        override var acceptsFirstResponder: Bool { true }
+        override func keyDown(with event: NSEvent) {
+            if configuration?.key(event) != true { super.keyDown(with: event) }
+        }
+        override func mouseDown(with event: NSEvent) {
+            window?.makeFirstResponder(self)
+            origin = event.locationInWindow
+        }
 
         override func mouseUp(with event: NSEvent) {
             guard origin != nil else { return }
             origin = nil
-            configuration?.click(event)
+            guard let configuration else { return }
+            let point = convert(event.locationInWindow, from: nil)
+            let inName = configuration.nameArea ? point.y < bounds.height * 0.36 : point.x > 26
+            if event.clickCount == 1, inName, event.modifierFlags.intersection([.command, .shift]).isEmpty {
+                configuration.nameClick()
+            }
+            configuration.click(event)
         }
 
         override func mouseDragged(with event: NSEvent) {

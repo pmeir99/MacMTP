@@ -86,6 +86,7 @@ private struct Reader {
 actor Device {
     private var connection: OpaquePointer?
     private var sequence: UInt32 = 0
+    private var cachedDirectories: [String: (date: Date, entries: [Entry])] = [:]
     private var received = Data()
     private let block = 256 * 1024
     private let timestamp: DateFormatter = {
@@ -112,6 +113,7 @@ actor Device {
         mac_usb_close(connection)
         connection = nil
         received.removeAll()
+        cachedDirectories.removeAll()
     }
 
     func connect() throws -> [Storage] {
@@ -141,9 +143,21 @@ actor Device {
         }
     }
 
+    func invalidateDirectories() { cachedDirectories.removeAll() }
+
     func list(storage: UInt32, parent: UInt32) throws -> [Entry] {
+        try Task.checkCancellation()
+        let key = "\(storage):\(parent)"
+        if let cached = cachedDirectories[key], Date().timeIntervalSince(cached.date) < 15 { return cached.entries }
+        let result = try readDirectory(storage: storage, parent: parent)
+        cachedDirectories[key] = (Date(), result)
+        return result
+    }
+
+    private func readDirectory(storage: UInt32, parent: UInt32) throws -> [Entry] {
         var handles = Reader(data: try exchange(0x1007, [storage, 0, parent]).0)
         return try handles.handles().map { handle in
+            try Task.checkCancellation()
             var info = Reader(data: try exchange(0x1008, [handle]).0, offset: 4)
             let format = try info.take(UInt16.self)
             _ = try info.take(UInt16.self)
@@ -156,9 +170,13 @@ actor Device {
         }
     }
 
-    func remove(_ entry: Entry) throws { _ = try exchange(0x100B, [entry.id, 0]) }
+    func remove(_ entry: Entry) throws {
+        cachedDirectories.removeAll()
+        _ = try exchange(0x100B, [entry.id, 0])
+    }
 
     func rename(_ entry: Entry, to name: String) throws {
+        cachedDirectories.removeAll()
         try validate(name)
         var payload = Data()
         try payload.putName(name)
@@ -235,11 +253,12 @@ actor Device {
     }
 
     func thumbnail(_ entry: Entry) throws -> Data {
+        try Task.checkCancellation()
         do {
             let thumbnail = try exchange(0x100A, [entry.id]).0
             if !thumbnail.isEmpty { return thumbnail }
         } catch DeviceError.rejected(_) {}
-        guard entry.size <= 24 * 1024 * 1024 else { return Data() }
+        guard entry.size <= 8 * 1024 * 1024 else { return Data() }
         return try exchange(0x1009, [entry.id]).0
     }
 
@@ -276,6 +295,7 @@ actor Device {
     }
 
     private func create(_ name: String, storage: UInt32, parent: UInt32, size: UInt32, folder: Bool) throws -> UInt32 {
+        cachedDirectories.removeAll()
         try validate(name)
         let parent = parent == UInt32.max ? 0 : parent
         var info = Data()
