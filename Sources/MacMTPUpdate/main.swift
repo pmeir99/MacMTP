@@ -57,12 +57,22 @@ func install() throws {
     try UpdateFiles.verifyApplication(replacement, version: version.value)
     try Data("ready".utf8).write(to: workspace.appendingPathComponent("ready"), options: .atomic)
     let deadline = ProcessInfo.processInfo.systemUptime + 60
-    while executablePath(pid) == expectedParent {
+    while true {
         if FileManager.default.fileExists(atPath: workspace.appendingPathComponent("cancel").path) {
             throw UpdateError.tool("The update was canceled because MacMTP could not quit. The installed app has not been replaced.")
         }
+        if kill(pid, 0) != 0 {
+            guard errno == ESRCH else {
+                throw UpdateError.tool("The updater could not confirm that the original MacMTP process exited. The installed app has not been replaced.")
+            }
+            break
+        }
         guard ProcessInfo.processInfo.systemUptime < deadline else { throw UpdateError.timeout }
         usleep(100_000)
+    }
+    // Cancellation must win if the parent requested it immediately before exiting.
+    if FileManager.default.fileExists(atPath: workspace.appendingPathComponent("cancel").path) {
+        throw UpdateError.tool("The update was canceled. The installed app has not been replaced.")
     }
 
     do {

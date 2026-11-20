@@ -162,7 +162,16 @@ final class UpdaterInstallationTests: XCTestCase {
         XCTAssertTrue(manager.fileExists(atPath: canonicalRoot.appendingPathComponent("modal-blocked").path),
                       "The host must first reproduce AppKit blocking quit with its update sheet open.")
         stage = "verify preserved or updated app"
-        try UpdateFiles.verifyApplication(installed, version: refuseQuit ? "1.0.0" : version)
+        let actualInfo = try PropertyListSerialization.propertyList(from: Data(contentsOf: info), format: nil) as? [String: Any]
+        let expectedVersion = refuseQuit ? "1.0.0" : version
+        XCTAssertEqual(actualInfo?["CFBundleShortVersionString"] as? String, expectedVersion,
+                       "A refused quit must preserve the original Info.plist on disk.")
+        do {
+            try UpdateFiles.verifyApplication(installed, version: expectedVersion)
+        } catch {
+            let bundle = Bundle(url: installed)
+            throw UpdateError.tool("\(error.localizedDescription) Expected \(expectedVersion); disk \(String(describing: actualInfo)); bundle \(String(describing: bundle?.infoDictionary)); path \(installed.path), resolved \(installed.resolvingSymlinksInPath().path)")
+        }
         } catch {
             throw UpdateError.tool("Update regression failed during \(stage): \(error.localizedDescription)")
         }
