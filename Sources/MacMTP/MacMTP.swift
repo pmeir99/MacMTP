@@ -34,7 +34,29 @@ struct MacMTPApp: App {
     }
 }
 
-private struct Browser: View {
+struct Browser: View {
+    private let automaticallyConnect: Bool
+    private let selectionObserver: ((Set<UInt32>) -> Void)?
+
+    init() {
+        automaticallyConnect = true
+        selectionObserver = nil
+    }
+
+    #if DEBUG
+    init(testEntries: [Entry], layout name: String, selectionObserver: @escaping (Set<UInt32>) -> Void) {
+        automaticallyConnect = false
+        self.selectionObserver = selectionObserver
+        _storages = State(initialValue: [Storage(id: 1, name: "Test Storage")])
+        _storage = State(initialValue: 1)
+        var initial = DirectoryContent()
+        initial.begin(parent: .max, cached: testEntries)
+        _content = State(initialValue: initial)
+        _directoryCache = State(initialValue: [.max: testEntries])
+        _layout = AppStorage(wrappedValue: Layout(rawValue: name) ?? .list,
+                             "testLayout-\(UUID().uuidString)")
+    }
+    #endif
     @EnvironmentObject private var updater: AppUpdater
     private enum Sort: String, CaseIterable {
         case name = "Name", kind = "Kind", size = "Size", modified = "Date Modified"
@@ -245,6 +267,7 @@ private struct Browser: View {
         }
         .disabled(updater.isInstalling)
         .onAppear {
+            if !automaticallyConnect { fileAreaFocused = true }
             let connectedDevice = device
             updater.prepareForRelaunch = { await connectedDevice.disconnect() }
         }
@@ -253,6 +276,7 @@ private struct Browser: View {
             previews.suspended = value
         }
         .task {
+            guard automaticallyConnect else { return }
             if !startupRecoveryDone {
                 startupRecoveryDone = true
                 if automaticUSBRecovery {
@@ -307,6 +331,10 @@ private struct Browser: View {
         .quickLookPreview($previewURL)
         .onChange(of: previewURL) { _, url in
             if url == nil { previews.clearLocalFiles() }
+        }
+        .onChange(of: selection) { _, ids in
+            selectionObserver?(ids)
+            if ids.count == 1 { keyboardAnchor = ids.first }
         }
         .onChange(of: layout) {
             activeColumn = folders.count
@@ -389,19 +417,24 @@ private struct Browser: View {
                                     itemRow(item, highlighted: highlighted) { event in
                                         fileAreaFocused = true
                                         if event.clickCount == 2, !item.folder { quickLook(item) }
-                                        else { columnSelect(item, index: index) }
+                                        else if index == folders.count,
+                                                event.modifierFlags.contains(.command) || event.modifierFlags.contains(.shift) {
+                                            select(item, event: event)
+                                        } else if selection != [item.id] || index != activeColumn {
+                                            columnSelect(item, index: index)
+                                        }
                                     }
                                 }
                             }.padding(6)
                         }
                         .onChange(of: selection) { _, ids in
-                            if index == folders.count, let id = ids.first { reader.scrollTo(id) }
+                            if index == activeColumn, let id = keyboardAnchor ?? ids.first { reader.scrollTo(id) }
                         }
                         }
                         .frame(width: 225)
                         Divider()
                     }
-                    if let item = selected.first {
+                    if let item = selected.first, !loading {
                         previewDetails(item).frame(width: 260)
                     }
                 }
@@ -704,6 +737,7 @@ private struct Browser: View {
     }
 
     private func invalidateContent() async {
+        previewURL = nil
         directoryCache = [:]
         folderSizes = [:]
         previews.reset()
@@ -789,7 +823,16 @@ private struct Browser: View {
             let items = index == folders.count ? visible : sortedItems(directoryCache[container] ?? [])
             let current = index < folders.count ? folders[index].id : keyboardAnchor ?? selection.first
             if let id = FileNavigation.destination(ids: items.map(\.id), selected: current, delta: code == 126 ? -1 : 1),
-               let item = items.first(where: { $0.id == id }) { columnSelect(item, index: index) }
+               let item = items.first(where: { $0.id == id }) {
+                if shift {
+                    var ids = selection
+                    if let current { ids.insert(current) }
+                    ids.insert(id)
+                    if index < folders.count { navigate(to: Array(folders.prefix(index)), activeAt: index) }
+                    selection = ids
+                    keyboardAnchor = id
+                } else { columnSelect(item, index: index) }
+            }
             return true
         }
         let delta: Int
