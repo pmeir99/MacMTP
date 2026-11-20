@@ -2,13 +2,17 @@
 
 typedef struct MacUSB MacUSB;
 enum { MAC_USB_STAGE_DISCOVERY = 0, MAC_USB_STAGE_OPEN = 1,
-       MAC_USB_STAGE_CLAIM = 2, MAC_USB_STAGE_CONFIGURE = 3 };
+       MAC_USB_STAGE_CLAIM = 2, MAC_USB_STAGE_CONFIGURE = 3, MAC_USB_STAGE_RESET = 4 };
 typedef struct {
     int stage;
     int kernel_driver_active;
     uint16_t vendor, product;
     uint8_t interface_number;
+    uint8_t bus_number, device_address;
+    int reset_attempts, reset_status;
 } MacUSBDiagnostics;
+// Explicit recovery only: matches this exact USB location and interface before resetting.
+MacUSB *mac_usb_open_recovering(int *error, MacUSBDiagnostics *diagnostics, const MacUSBDiagnostics *target);
 MacUSB *mac_usb_open_with_diagnostics(int *error, MacUSBDiagnostics *diagnostics);
 // error receives the libusb failure when no MTP interface can be opened.
 MacUSB *mac_usb_open(int *error);

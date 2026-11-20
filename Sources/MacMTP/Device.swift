@@ -143,13 +143,18 @@ actor Device {
         cachedDirectories.removeAll()
     }
 
-    func connect() throws -> [Storage] {
+    func connect(recovering target: USBResetTarget? = nil) throws -> [Storage] {
         if connection == nil {
             var status: Int32 = 0
             var diagnostics = MacUSBDiagnostics()
-            guard let port = mac_usb_open_with_diagnostics(&status, &diagnostics) else {
-                throw USBOpenFailure(status: status, diagnostics: diagnostics)
+            let port: OpaquePointer?
+            if let target {
+                var identity = target.diagnostic
+                port = mac_usb_open_recovering(&status, &diagnostics, &identity)
+            } else {
+                port = mac_usb_open_with_diagnostics(&status, &diagnostics)
             }
+            guard let port else { throw USBOpenFailure(status: status, diagnostics: diagnostics) }
             connection = port
             sequence = 0
             do {

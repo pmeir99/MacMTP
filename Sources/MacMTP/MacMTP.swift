@@ -87,6 +87,7 @@ struct Browser: View {
     @State private var startupRecoveryDone = false
     @State private var connectionIssue = ConnectionIssue.waiting
     @State private var connectionRetry = ConnectionRetryPolicy()
+    @State private var previousUSBReset: String?
     @State private var storages: [Storage] = []
     @State private var storage: UInt32?
     @State private var folders: [Entry] = []
@@ -177,7 +178,8 @@ struct Browser: View {
                     if storages.isEmpty {
                         ConnectionHelpView(issue: connectionIssue, busy: busy,
                             reconnect: { connectionRetry.reset(); Task { await attemptConnection() } },
-                            recover: { recoverInline() }, recoverMediaApps: { recoverInline(includingMediaApps: true) })
+                            recover: { recoverInline() }, recoverMediaApps: { recoverInline(includingMediaApps: true) },
+                            resetUSB: { if let target = connectionIssue.resetTarget { resetPhoneUSB(target) } })
                     } else {
                         ContentUnavailableView("Select Device Storage", systemImage: "externaldrive",
                                                description: Text("Choose a storage location in the sidebar."))
@@ -977,7 +979,8 @@ struct Browser: View {
                 content.reset()
             }
             connectionIssue = .waiting
-            if storages.isEmpty { connectionRetry.failed() } else { connectionRetry.reset() }
+            if storages.isEmpty { connectionRetry.failed() }
+            else { connectionRetry.reset(); previousUSBReset = nil }
             status = ""
             if !storages.contains(where: { $0.id == storage }) {
                 storage = storages.first?.id
@@ -988,9 +991,32 @@ struct Browser: View {
             storages = []
             storage = nil
             content.reset()
-            connectionIssue = ConnectionIssue(error: error)
+            connectionIssue = ConnectionIssue(error: error, previousReset: previousUSBReset)
             connectionRetry.failed()
             status = previous.isEmpty ? error.localizedDescription : "Device disconnected. \(error.localizedDescription)"
+        }
+    }
+
+    private func resetPhoneUSB(_ target: USBResetTarget) {
+        guard storage == nil else { return }
+        connectionRetry.reset()
+        run {
+            status = "Resetting this phone’s USB connection…"
+            await device.disconnect()
+            do {
+                storages = try await device.connect(recovering: target)
+                deviceSession = await device.sessionIdentifier
+                storage = storages.first?.id
+                connectionIssue = .waiting
+                previousUSBReset = nil
+                record("Retried the selected phone’s USB interface.")
+            } catch {
+                if let failure = error as? USBOpenFailure, failure.resetAttempts > 0 {
+                    previousUSBReset = failure.details
+                }
+                connectionIssue = ConnectionIssue(error: error, previousReset: previousUSBReset)
+                record("Phone USB reset: " + error.localizedDescription)
+            }
         }
     }
 
@@ -999,7 +1025,7 @@ struct Browser: View {
         run {
             do { try await recoverUSBConnection(includingMediaApps: includingMediaApps) }
             catch {
-                connectionIssue = ConnectionIssue(error: error)
+                connectionIssue = ConnectionIssue(error: error, previousReset: previousUSBReset)
                 connectionRetry.failed()
                 record(error.localizedDescription)
             }
@@ -1021,7 +1047,7 @@ struct Browser: View {
             storage = storages.first?.id
             connectionIssue = .waiting
         } catch {
-            connectionIssue = ConnectionIssue(error: error)
+            connectionIssue = ConnectionIssue(error: error, previousReset: previousUSBReset)
             throw error
         }
     }

@@ -49,17 +49,15 @@ body = """Native Android file transfer for Apple Silicon Macs running macOS 27 o
 
 Download **MacMTP.dmg** for installation, or unzip **MacMTP.zip** and move MacMTP.app into Applications.
 
-Makes USB connection recovery faster and clearer:
-- Direct Reconnect and Recover USB buttons on the connection screen.
-- Fast initial retries, bounded backoff, and an immediate retry when returning to the app.
-- Distinguishes device-open denial from interface-claim denial and a detected kernel-driver conflict.
-- Copies useful connection diagnostics with the failure stage, USB device/interface, and macOS version.
-- Skips ADB interfaces during MTP discovery and avoids unnecessary descriptor requests for standard MTP interfaces.
-- Optional, explicitly labeled graceful closing of Photos and Image Capture; automatic recovery leaves them alone.
+Adds targeted recovery for an MTP interface blocked by an active macOS driver.
 
-On the phone, unlock it and select File Transfer (MTP). On Apple-silicon MacBooks, approve any accessory connection prompt. macOS controls accessory approval; MacMTP cannot grant it automatically.
+When diagnostics confirm interface-claim denial with an active driver, the connection screen offers **Reset Phone USB**. This matches the USB vendor/product, bus, device address, and interface before resetting. It then immediately retries the MTP interface, with at most two reset attempts per button press.
 
-Includes the updater quit/relaunch fix from 1.2.1 and the Finder-style browsing improvements from 1.2.0. If an older updater is already stuck, install this release manually once.
+Resetting briefly interrupts USB activity on that phone, including transfers, debugging, or tethering. It never resets other USB devices, runs during automatic polling, or kills system-wide camera services. If the reset requires re-enumeration, the old handle is closed and normal discovery resumes.
+
+Connection details now include the USB location and reset results. A failed reset is retained in subsequent diagnostic reports.
+
+Includes all browsing, connection recovery, and updater fixes from previous versions. A specific phone’s recovery still depends on macOS and device behavior; hardware validation is necessary to confirm that a driver releases the interface on that device.
 
 Recursive folder sizes are available under View > Calculate Folder Sizes. This is optional because scanning large trees can delay USB operations. The app does not scan the entire phone on connection.
 

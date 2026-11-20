@@ -15,11 +15,15 @@ struct libusb_interface { const struct libusb_interface_descriptor *altsetting; 
 struct libusb_config_descriptor { uint8_t bNumInterfaces; const struct libusb_interface *interface; };
 struct libusb_device_descriptor { uint16_t idVendor, idProduct; };
 enum { LIBUSB_TRANSFER_TYPE_BULK = 2, LIBUSB_ENDPOINT_IN = 0x80, LIBUSB_CLASS_IMAGE = 6,
-       LIBUSB_CLASS_VENDOR_SPEC = 255, LIBUSB_ERROR_NO_MEM = -11, LIBUSB_ERROR_NO_DEVICE = -4 };
+       LIBUSB_CLASS_VENDOR_SPEC = 255, LIBUSB_ERROR_NO_MEM = -11, LIBUSB_ERROR_NO_DEVICE = -4,
+       LIBUSB_ERROR_ACCESS = -3, LIBUSB_ERROR_INVALID_PARAM = -2 };
 int libusb_init(libusb_context **);
 ssize_t libusb_get_device_list(libusb_context *, libusb_device ***);
 int libusb_get_active_config_descriptor(libusb_device *, struct libusb_config_descriptor **);
 int libusb_get_device_descriptor(libusb_device *, struct libusb_device_descriptor *);
+uint8_t libusb_get_bus_number(libusb_device *);
+uint8_t libusb_get_device_address(libusb_device *);
+int libusb_reset_device(libusb_device_handle *);
 int libusb_open(libusb_device *, libusb_device_handle **);
 int libusb_get_string_descriptor_ascii(libusb_device_handle *, uint8_t, unsigned char *, int);
 int libusb_claim_interface(libusb_device_handle *, int);
