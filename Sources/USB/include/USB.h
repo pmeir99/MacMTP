@@ -1,6 +1,15 @@
 #include <stdint.h>
 
 typedef struct MacUSB MacUSB;
+enum { MAC_USB_STAGE_DISCOVERY = 0, MAC_USB_STAGE_OPEN = 1,
+       MAC_USB_STAGE_CLAIM = 2, MAC_USB_STAGE_CONFIGURE = 3 };
+typedef struct {
+    int stage;
+    int kernel_driver_active;
+    uint16_t vendor, product;
+    uint8_t interface_number;
+} MacUSBDiagnostics;
+MacUSB *mac_usb_open_with_diagnostics(int *error, MacUSBDiagnostics *diagnostics);
 // error receives the libusb failure when no MTP interface can be opened.
 MacUSB *mac_usb_open(int *error);
 // Stops an existing local ADB server using the ADB host protocol.

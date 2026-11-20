@@ -85,7 +85,8 @@ struct Browser: View {
     @State private var usbRecovery = USBRecovery()
     @AppStorage("automaticUSBRecovery") private var automaticUSBRecovery = true
     @State private var startupRecoveryDone = false
-    @State private var connectionMessage = DeviceError.unavailable.localizedDescription
+    @State private var connectionIssue = ConnectionIssue.waiting
+    @State private var connectionRetry = ConnectionRetryPolicy()
     @State private var storages: [Storage] = []
     @State private var storage: UInt32?
     @State private var folders: [Entry] = []
@@ -173,8 +174,14 @@ struct Browser: View {
         } detail: {
             VStack(spacing: 0) {
                 if storage == nil {
-                    ContentUnavailableView("No Storage Selected", systemImage: "cable.connector",
-                                           description: Text(connectionMessage))
+                    if storages.isEmpty {
+                        ConnectionHelpView(issue: connectionIssue, busy: busy,
+                            reconnect: { connectionRetry.reset(); Task { await attemptConnection() } },
+                            recover: { recoverInline() }, recoverMediaApps: { recoverInline(includingMediaApps: true) })
+                    } else {
+                        ContentUnavailableView("Select Device Storage", systemImage: "externaldrive",
+                                               description: Text("Choose a storage location in the sidebar."))
+                    }
                 } else {
                     browserContent
                         .background(FileKeyboard(enabled: fileAreaFocused, handle: handleNativeKey))
@@ -305,42 +312,16 @@ struct Browser: View {
                 }
             }
             while !Task.isCancelled {
-                if !busy && !updater.isInstalling {
-                    busy = true
-                    let previous = storages
-                    do {
-                        storages = try await device.connect()
-                        let session = await device.sessionIdentifier
-                        let changedSession = deviceSession != session
-                        deviceSession = session
-                        if changedSession {
-                            previews.reset()
-                            directoryCache = [:]
-                            folderSizes = [:]
-                            folders = []
-                            activeColumn = 0
-                            selection = []
-                            keyboardAnchor = nil
-                            search = ""
-                            content.reset()
-                        }
-                        connectionMessage = DeviceError.unavailable.localizedDescription
-                        status = ""
-                        if !storages.contains(where: { $0.id == storage }) {
-                            storage = storages.first?.id
-                        } else if changedSession {
-                            try await reload()
-                        }
-                    } catch {
-                        storages = []
-                        storage = nil
-                        content.reset()
-                        connectionMessage = error.localizedDescription
-                        status = previous.isEmpty ? error.localizedDescription : "Device disconnected. \(error.localizedDescription)"
-                    }
-                    busy = false
-                }
-                do { try await Task.sleep(for: .seconds(6)) } catch { return }
+                await attemptConnection()
+                do {
+                    try await Task.sleep(for: storages.isEmpty ? connectionRetry.delay : .seconds(6))
+                } catch { return }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            if automaticallyConnect && storage == nil {
+                connectionRetry.reset()
+                Task { await attemptConnection() }
             }
         }
         .task(id: "\(listingVersion)-\(calculateFolderSizes)-\(busy)") {
@@ -974,22 +955,73 @@ struct Browser: View {
         }
     }
 
-    private func recoverUSBConnection() async throws {
+    private func attemptConnection() async {
+        guard !busy, !updater.isInstalling else { return }
+        busy = true
+        defer { busy = activeExports > 0 }
+        let previous = storages
+        do {
+            storages = try await device.connect()
+            let session = await device.sessionIdentifier
+            let changedSession = deviceSession != session
+            deviceSession = session
+            if changedSession {
+                previews.reset()
+                directoryCache = [:]
+                folderSizes = [:]
+                folders = []
+                activeColumn = 0
+                selection = []
+                keyboardAnchor = nil
+                search = ""
+                content.reset()
+            }
+            connectionIssue = .waiting
+            if storages.isEmpty { connectionRetry.failed() } else { connectionRetry.reset() }
+            status = ""
+            if !storages.contains(where: { $0.id == storage }) {
+                storage = storages.first?.id
+            } else if changedSession {
+                try await reload()
+            }
+        } catch {
+            storages = []
+            storage = nil
+            content.reset()
+            connectionIssue = ConnectionIssue(error: error)
+            connectionRetry.failed()
+            status = previous.isEmpty ? error.localizedDescription : "Device disconnected. \(error.localizedDescription)"
+        }
+    }
+
+    private func recoverInline(includingMediaApps: Bool = false) {
+        connectionRetry.reset()
+        run {
+            do { try await recoverUSBConnection(includingMediaApps: includingMediaApps) }
+            catch {
+                connectionIssue = ConnectionIssue(error: error)
+                connectionRetry.failed()
+                record(error.localizedDescription)
+            }
+        }
+    }
+
+    private func recoverUSBConnection(includingMediaApps: Bool = false) async throws {
         await device.disconnect()
         storages = []
         storage = nil
         content.reset()
         selection = []
         status = "Releasing Android USB…"
-        let messages = await usbRecovery.recover()
+        let messages = await usbRecovery.recover(includingMediaApps: includingMediaApps)
         messages.forEach { record($0) }
         do {
             storages = try await device.connect()
             deviceSession = await device.sessionIdentifier
             storage = storages.first?.id
-            connectionMessage = DeviceError.unavailable.localizedDescription
+            connectionIssue = .waiting
         } catch {
-            connectionMessage = error.localizedDescription
+            connectionIssue = ConnectionIssue(error: error)
             throw error
         }
     }

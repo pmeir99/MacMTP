@@ -10,10 +10,29 @@ struct MacUSB {
     uint8_t input, output, interface;
     int packet_size;
     int last_error;
+    MacUSBDiagnostics diagnostic;
 };
+
+static void record_failure(MacUSB *connection, libusb_device *device,
+                           const struct libusb_interface_descriptor *interface,
+                           int status, int stage, int driver_active) {
+    // Prefer a confirmed MTP interface failure over a later discovery/open failure.
+    if (connection->diagnostic.stage > stage) return;
+    struct libusb_device_descriptor descriptor = {0};
+    (void)libusb_get_device_descriptor(device, &descriptor);
+    connection->last_error = status;
+    connection->diagnostic.stage = stage;
+    connection->diagnostic.kernel_driver_active = driver_active;
+    connection->diagnostic.vendor = descriptor.idVendor;
+    connection->diagnostic.product = descriptor.idProduct;
+    connection->diagnostic.interface_number = interface->bInterfaceNumber;
+}
 
 static int claim(MacUSB *connection, libusb_device *device,
                  const struct libusb_interface_descriptor *interface) {
+    // Android's ADB interface is not MTP; do not open it while discovering storage.
+    if (interface->bInterfaceClass == LIBUSB_CLASS_VENDOR_SPEC &&
+        interface->bInterfaceSubClass == 0x42 && interface->bInterfaceProtocol == 1) return 0;
     uint8_t input = 0, output = 0;
     int packet_size = 0;
     for (int index = 0; index < interface->bNumEndpoints; index++) {
@@ -32,20 +51,23 @@ static int claim(MacUSB *connection, libusb_device *device,
                       interface->bInterfaceSubClass == 1;
     int status = libusb_open(device, &handle);
     if (status != 0) {
-        if (still_image) connection->last_error = status;
+        if (still_image) record_failure(connection, device, interface, status, MAC_USB_STAGE_OPEN, -1);
         return 0;
     }
-    unsigned char name[64] = {0};
-    int length = interface->iInterface
-        ? libusb_get_string_descriptor_ascii(handle, interface->iInterface, name, sizeof(name))
-        : 0;
-    if (!still_image && (length < 3 || strncasecmp((char *)name, "MTP", 3))) {
-        libusb_close(handle);
-        return 0;
+    if (!still_image) {
+        unsigned char name[64] = {0};
+        int length = interface->iInterface
+            ? libusb_get_string_descriptor_ascii(handle, interface->iInterface, name, sizeof(name))
+            : 0;
+        if (length < 3 || strncasecmp((char *)name, "MTP", 3)) {
+            libusb_close(handle);
+            return 0;
+        }
     }
     status = libusb_claim_interface(handle, interface->bInterfaceNumber);
     if (status != 0) {
-        connection->last_error = status;
+        record_failure(connection, device, interface, status, MAC_USB_STAGE_CLAIM,
+                       libusb_kernel_driver_active(handle, interface->bInterfaceNumber));
         libusb_close(handle);
         return 0;
     }
@@ -54,7 +76,7 @@ static int claim(MacUSB *connection, libusb_device *device,
                                                   interface->bAlternateSetting);
     }
     if (status != 0) {
-        connection->last_error = status;
+        record_failure(connection, device, interface, status, MAC_USB_STAGE_CONFIGURE, -1);
         libusb_release_interface(handle, interface->bInterfaceNumber);
         libusb_close(handle);
         return 0;
@@ -68,6 +90,11 @@ static int claim(MacUSB *connection, libusb_device *device,
 }
 
 MacUSB *mac_usb_open(int *error) {
+    return mac_usb_open_with_diagnostics(error, NULL);
+}
+
+MacUSB *mac_usb_open_with_diagnostics(int *error, MacUSBDiagnostics *diagnostics) {
+    if (diagnostics) memset(diagnostics, 0, sizeof(*diagnostics));
     if (!error) return NULL;
     *error = LIBUSB_ERROR_NO_MEM;
     MacUSB *connection = calloc(1, sizeof(*connection));
@@ -79,6 +106,7 @@ MacUSB *mac_usb_open(int *error) {
         return NULL;
     }
     connection->last_error = LIBUSB_ERROR_NO_DEVICE;
+    connection->diagnostic.kernel_driver_active = -1;
     libusb_device **devices = NULL;
     ssize_t count = libusb_get_device_list(connection->context, &devices);
     if (count < 0) connection->last_error = (int)count;
@@ -102,6 +130,7 @@ MacUSB *mac_usb_open(int *error) {
         return connection;
     }
     *error = connection->last_error;
+    if (diagnostics) *diagnostics = connection->diagnostic;
     mac_usb_close(connection);
     return NULL;
 }

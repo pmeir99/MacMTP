@@ -49,13 +49,17 @@ body = """Native Android file transfer for Apple Silicon Macs running macOS 27 o
 
 Download **MacMTP.dmg** for installation, or unzip **MacMTP.zip** and move MacMTP.app into Applications.
 
-Fixes an updater hang at “Reopening the updated MacMTP”. The app now dismisses its update sheet before quitting, checks for a failed quit, and cancels the waiting helper safely if termination is refused.
+Makes USB connection recovery faster and clearer:
+- Direct Reconnect and Recover USB buttons on the connection screen.
+- Fast initial retries, bounded backoff, and an immediate retry when returning to the app.
+- Distinguishes device-open denial from interface-claim denial and a detected kernel-driver conflict.
+- Copies useful connection diagnostics with the failure stage, USB device/interface, and macOS version.
+- Skips ADB interfaces during MTP discovery and avoids unnecessary descriptor requests for standard MTP interfaces.
+- Optional, explicitly labeled graceful closing of Photos and Image Capture; automatic recovery leaves them alone.
 
-Regression checks reproduce AppKit blocking termination with an open modal sheet, then verify the app quits, installs, and relaunches. A separate refusal test verifies the installed app remains unchanged and the helper exits.
+On the phone, unlock it and select File Transfer (MTP). On Apple-silicon MacBooks, approve any accessory connection prompt. macOS controls accessory approval; MacMTP cannot grant it automatically.
 
-If an older installed version is already stuck, force quit MacMTP and install this release manually once. The old running updater cannot receive this fix until the patched app is installed.
-
-Includes the Finder-style browsing, keyboard navigation, inline rename, and native Quick Look improvements from 1.2.0.
+Includes the updater quit/relaunch fix from 1.2.1 and the Finder-style browsing improvements from 1.2.0. If an older updater is already stuck, install this release manually once.
 
 Recursive folder sizes are available under View > Calculate Folder Sizes. This is optional because scanning large trees can delay USB operations. The app does not scan the entire phone on connection.
 

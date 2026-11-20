@@ -4,23 +4,26 @@ import USB
 enum USBRecoveryPolicy {
     // Exact bundle identifiers only. Finder, Photos, Android Studio, and
     // unrecognized processes are never included in automatic recovery.
+    // Media apps are only requested to quit by the explicitly labeled recovery action.
     static let transferApps: Set<String> = [
         "com.google.android.mtpviewer",
         "com.google.android.mtpagent",
         "io.ganeshrvel.openmtp"
     ]
 
-    static func canQuit(_ identifier: String?) -> Bool {
+    static let mediaApps: Set<String> = ["com.apple.Photos", "com.apple.Image_Capture"]
+
+    static func canQuit(_ identifier: String?, includingMediaApps: Bool = false) -> Bool {
         guard let identifier else { return false }
-        return transferApps.contains(identifier)
+        return transferApps.contains(identifier) || (includingMediaApps && mediaApps.contains(identifier))
     }
 }
 
 actor USBRecovery {
-    func recover() async -> [String] {
+    func recover(includingMediaApps: Bool = false) async -> [String] {
         var messages = await MainActor.run {
             NSWorkspace.shared.runningApplications.compactMap { app -> String? in
-                guard USBRecoveryPolicy.canQuit(app.bundleIdentifier),
+                guard USBRecoveryPolicy.canQuit(app.bundleIdentifier, includingMediaApps: includingMediaApps),
                       app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return nil }
                 let name = app.localizedName ?? "Android transfer app"
                 return app.terminate()

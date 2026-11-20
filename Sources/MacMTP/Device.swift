@@ -18,12 +18,13 @@ struct Entry: Identifiable, Sendable {
 }
 
 enum DeviceError: LocalizedError {
-    case unavailable, interfaceBusy, usbAccessDenied, malformed, tooLarge, unsafeName
+    case unavailable, interfaceBusy, usbAccessDenied, interfaceAccessDenied, malformed, tooLarge, unsafeName
     case transport(Int32), rejected(UInt16)
 
-    static func openingUSB(_ status: Int32) -> DeviceError {
+    static func openingUSB(_ status: Int32, stage: Int32 = 0, driverActive: Bool = false) -> DeviceError {
         switch status {
         case -6: .interfaceBusy
+        case -3 where stage >= 2: driverActive ? .interfaceBusy : .interfaceAccessDenied
         case -3: .usbAccessDenied
         case -4: .unavailable
         default: .transport(status)
@@ -34,9 +35,11 @@ enum DeviceError: LocalizedError {
         switch self {
         case .unavailable: "Unlock your Android device and select USB File Transfer."
         case .interfaceBusy:
-            "Another app is using the Android USB interface. Use Recover USB Connection, or close Android transfer and debugging apps, then reconnect the phone."
+            "An app or macOS USB driver is holding the phone’s file-transfer interface. Use Recover USB, then reconnect the phone in File Transfer mode."
         case .usbAccessDenied:
-            "macOS denied access to the USB device. Unlock this Mac, reconnect the phone, and approve any accessory connection prompt. Check Privacy & Security in System Settings."
+            "MacMTP could not open the USB device. Unlock the phone, select File Transfer (MTP), then reconnect the USB cable."
+        case .interfaceAccessDenied:
+            "macOS blocked the phone’s file-transfer interface. Recover USB or close other apps using the phone, then reconnect in File Transfer mode."
         case .malformed: "The device sent an invalid MTP response. Reconnect the device and try again."
         case .tooLarge: "This operation exceeds the supported MTP size."
         case .unsafeName: "The file or folder name is invalid."
@@ -143,7 +146,10 @@ actor Device {
     func connect() throws -> [Storage] {
         if connection == nil {
             var status: Int32 = 0
-            guard let port = mac_usb_open(&status) else { throw DeviceError.openingUSB(status) }
+            var diagnostics = MacUSBDiagnostics()
+            guard let port = mac_usb_open_with_diagnostics(&status, &diagnostics) else {
+                throw USBOpenFailure(status: status, diagnostics: diagnostics)
+            }
             connection = port
             sequence = 0
             do {
