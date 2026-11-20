@@ -20,6 +20,8 @@ final class UpdaterInstallationTests: XCTestCase {
         let version = try XCTUnwrap(Bundle(url: source)?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
         let token = UUID()
         let workspace = UpdateFiles.workspace(token)
+        var stage = "create workspace"
+        do {
         try manager.createDirectory(at: workspace, withIntermediateDirectories: true,
                                     attributes: [.posixPermissions: 0o700])
         let root = manager.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -33,12 +35,14 @@ final class UpdaterInstallationTests: XCTestCase {
                 where app.bundleURL?.resolvingSymlinksInPath().path == installed.path {
                 app.forceTerminate()
             }
-            try? manager.removeItem(at: root)
-            try? manager.removeItem(at: workspace)
+            if manager.fileExists(atPath: root.path) { try? manager.removeItem(at: root) }
+            if manager.fileExists(atPath: workspace.path) { try? manager.removeItem(at: workspace) }
         }
 
+        stage = "copy installed app"
         try UpdateFiles.tool("/usr/bin/ditto", [source.path, installed.path])
         let staged = workspace.appendingPathComponent("unpacked/MacMTP.app")
+        stage = "stage update"
         try UpdateFiles.tool("/usr/bin/ditto", [source.path, staged.path])
         let info = installed.appendingPathComponent("Contents/Info.plist")
         var dictionary = try XCTUnwrap(PropertyListSerialization.propertyList(from: Data(contentsOf: info),
@@ -125,13 +129,16 @@ final class UpdaterInstallationTests: XCTestCase {
         let project = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
         let support = project.appendingPathComponent("Sources/UpdateSupport")
+        stage = "compile AppKit update host"
         try UpdateFiles.tool("/usr/bin/xcrun", ["swiftc", "-parse-as-library", "-swift-version", "5", "-target", "arm64-apple-macos27.0",
             "-warnings-as-errors", hostSource.path, support.appendingPathComponent("Release.swift").path,
             support.appendingPathComponent("Relaunch.swift").path, "-o", executable.path])
+        stage = "sign AppKit update host"
         try UpdateFiles.tool("/usr/bin/codesign", ["--force", "--sign", "-", installed.path])
 
         host.executableURL = executable
         host.arguments = [staged.path, version, token.uuidString, refuseQuit ? "refuse" : "allow"]
+        stage = "launch AppKit update host"
         try host.run()
         let deadline = ProcessInfo.processInfo.systemUptime + 70
         let rollback = canonicalRoot.appendingPathComponent(".MacMTP-update-\(token.uuidString).app")
@@ -154,6 +161,10 @@ final class UpdaterInstallationTests: XCTestCase {
         else { XCTFail("The update host did not exit after installer readiness.") }
         XCTAssertTrue(manager.fileExists(atPath: canonicalRoot.appendingPathComponent("modal-blocked").path),
                       "The host must first reproduce AppKit blocking quit with its update sheet open.")
+        stage = "verify preserved or updated app"
         try UpdateFiles.verifyApplication(installed, version: refuseQuit ? "1.0.0" : version)
+        } catch {
+            throw UpdateError.tool("Update regression failed during \(stage): \(error.localizedDescription)")
+        }
     }
 }
