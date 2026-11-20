@@ -84,6 +84,7 @@ private struct Reader {
 }
 
 actor Device {
+    private(set) var sessionIdentifier = UUID()
     private var connection: OpaquePointer?
     private var sequence: UInt32 = 0
     private var cachedDirectories: [String: (date: Date, entries: [Entry])] = [:]
@@ -110,6 +111,7 @@ actor Device {
     }
 
     private func reset() {
+        sessionIdentifier = UUID()
         mac_usb_close(connection)
         connection = nil
         received.removeAll()
@@ -150,6 +152,10 @@ actor Device {
         let key = "\(storage):\(parent)"
         if let cached = cachedDirectories[key], Date().timeIntervalSince(cached.date) < 15 { return cached.entries }
         let result = try readDirectory(storage: storage, parent: parent)
+        if cachedDirectories.count >= 64,
+           let oldest = cachedDirectories.min(by: { $0.value.date < $1.value.date })?.key {
+            cachedDirectories.removeValue(forKey: oldest)
+        }
         cachedDirectories[key] = (Date(), result)
         return result
     }

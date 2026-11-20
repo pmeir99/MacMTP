@@ -1,6 +1,6 @@
 import AppKit
 import SwiftUI
-import QuickLookUI
+import QuickLook
 import QuickLookThumbnailing
 import UniformTypeIdentifiers
 import ImageIO
@@ -42,8 +42,9 @@ private struct Browser: View {
 
     @StateObject private var previews = PreviewStore()
     @State private var previewURL: URL?
-    @State private var loading = false
-    @State private var loadedParent: UInt32?
+    @State private var content = DirectoryContent()
+    private var loading: Bool { content.loading }
+    private var loadedParent: UInt32? { content.loadedParent }
     @State private var keyboardAnchor: UInt32?
     @State private var gridColumns = 1
     @State private var activeColumn = 0
@@ -52,6 +53,7 @@ private struct Browser: View {
     @AppStorage("calculateFolderSizes") private var calculateFolderSizes = false
     @State private var sort: Sort = .name
     @State private var device = Device()
+    @State private var deviceSession: UUID?
     @State private var usbRecovery = USBRecovery()
     @AppStorage("automaticUSBRecovery") private var automaticUSBRecovery = true
     @State private var startupRecoveryDone = false
@@ -59,7 +61,7 @@ private struct Browser: View {
     @State private var storages: [Storage] = []
     @State private var storage: UInt32?
     @State private var folders: [Entry] = []
-    @State private var entries: [Entry] = []
+    private var entries: [Entry] { content.entries }
     @State private var selection: Set<UInt32> = []
     @State private var search = ""
     @State private var busy = false
@@ -268,15 +270,29 @@ private struct Browser: View {
                     let previous = storages
                     do {
                         storages = try await device.connect()
+                        let session = await device.sessionIdentifier
+                        let changedSession = deviceSession != session
+                        deviceSession = session
+                        if changedSession {
+                            previews.reset()
+                            directoryCache = [:]
+                            folderSizes = [:]
+                            folders = []
+                            activeColumn = 0
+                            selection = []
+                            content.reset()
+                        }
                         connectionMessage = DeviceError.unavailable.localizedDescription
                         status = ""
                         if !storages.contains(where: { $0.id == storage }) {
                             storage = storages.first?.id
+                        } else if changedSession {
+                            try await reload()
                         }
                     } catch {
                         storages = []
                         storage = nil
-                        entries = []
+                        content.reset()
                         connectionMessage = error.localizedDescription
                         status = previous.isEmpty ? error.localizedDescription : "Device disconnected. \(error.localizedDescription)"
                     }
@@ -289,6 +305,9 @@ private struct Browser: View {
             if calculateFolderSizes { await measureFolders() }
         }
         .quickLookPreview($previewURL)
+        .onChange(of: previewURL) { _, url in
+            if url == nil { previews.clearLocalFiles() }
+        }
         .onChange(of: layout) {
             activeColumn = folders.count
             renaming = nil
@@ -297,12 +316,11 @@ private struct Browser: View {
         }
         .onChange(of: storage) {
             previews.reset()
-            loadedParent = nil
+            content.reset()
             directoryCache = [:]
             folderSizes = [:]
             folders = []
             activeColumn = 0
-            entries = []
             selection = []
             if storage != nil { run { try await reload() } }
         }
@@ -342,7 +360,17 @@ private struct Browser: View {
     }
 
     @ViewBuilder private var browserContent: some View {
-        if layout == .columns {
+        if layout == .columns { columnContent }
+        else if loading || loadedParent != parent { loadingPlaceholder }
+        else if visible.isEmpty {
+            ContentUnavailableView(search.isEmpty ? "Empty Folder" : "No Results",
+                                   systemImage: search.isEmpty ? "folder" : "magnifyingglass")
+        } else if layout == .icons { iconContent }
+        else if layout == .gallery { galleryContent }
+        else { listContent }
+    }
+
+    private var columnContent: some View {
             ScrollView(.horizontal) {
                 HStack(spacing: 0) {
                     ForEach(0...folders.count, id: \.self) { index in
@@ -380,12 +408,9 @@ private struct Browser: View {
                 .scrollTargetLayout()
             }
             .defaultScrollAnchor(.trailing, for: .sizeChanges)
-        } else if loading || loadedParent != parent {
-            loadingPlaceholder
-        } else if visible.isEmpty {
-            ContentUnavailableView(search.isEmpty ? "Empty Folder" : "No Results",
-                                   systemImage: search.isEmpty ? "folder" : "magnifyingglass")
-        } else if layout == .icons {
+    }
+
+    private var iconContent: some View {
             GeometryReader { geometry in
             ScrollViewReader { reader in
             ScrollView {
@@ -417,7 +442,9 @@ private struct Browser: View {
             }
             }
             }
-        } else if layout == .gallery {
+    }
+
+    private var galleryContent: some View {
             VStack(spacing: 10) {
                 if let item = selected.first ?? visible.first {
                     PreviewTile(entry: item, device: device, store: previews, storage: storage ?? 0, dimension: 360)
@@ -453,7 +480,9 @@ private struct Browser: View {
                 }
                 }
             }.padding(.top, 12)
-        } else {
+    }
+
+    private var listContent: some View {
             ScrollViewReader { reader in
             Table(visible, selection: $selection) {
                 TableColumn("Name") { item in
@@ -480,7 +509,6 @@ private struct Browser: View {
                 if let id = keyboardAnchor, ids.contains(id) { reader.scrollTo(id) }
             }
             }
-        }
     }
 
     private func itemRow(_ item: Entry, highlighted: Bool, click: @escaping (NSEvent) -> Void) -> some View {
@@ -814,8 +842,7 @@ private struct Browser: View {
         selection = id.map { [$0] } ?? []
         keyboardAnchor = id
         search = ""
-        entries = directoryCache[parent] ?? []
-        loadedParent = directoryCache[parent] == nil ? nil : parent
+        content.begin(parent: parent, cached: directoryCache[parent])
         listingVersion += 1 // Cancels recursive size work before issuing navigation I/O.
         run { try await reload() }
     }
@@ -828,20 +855,22 @@ private struct Browser: View {
     private func reload() async throws {
         guard let storage else { return }
         let requestedParent = parent
-        loading = loadedParent != requestedParent
-        if loading { entries = [] }
-        defer { loading = false }
+        content.begin(parent: requestedParent, cached: directoryCache[requestedParent])
         do {
             let result = try await device.list(storage: storage, parent: requestedParent)
             guard self.storage == storage, parent == requestedParent else { return }
-            entries = result
-            loadedParent = requestedParent
+            guard content.receive(result, parent: requestedParent) else { return }
             directoryCache[requestedParent] = result
+            if directoryCache.count > 64 {
+                let ancestors = Set([UInt32.max] + folders.map(\.id))
+                for key in Array(directoryCache.keys) where !ancestors.contains(key) && directoryCache.count > 64 {
+                    directoryCache.removeValue(forKey: key)
+                }
+            }
             listingVersion += 1
         } catch {
-            entries = []
+            content.receive([], parent: requestedParent)
             selection = []
-            loadedParent = requestedParent
             throw error
         }
         if layout != .columns || activeColumn == folders.count {
@@ -853,13 +882,14 @@ private struct Browser: View {
         await device.disconnect()
         storages = []
         storage = nil
-        entries = []
+        content.reset()
         selection = []
         status = "Releasing Android USB…"
         let messages = await usbRecovery.recover()
         messages.forEach { record($0) }
         do {
             storages = try await device.connect()
+            deviceSession = await device.sessionIdentifier
             storage = storages.first?.id
             connectionMessage = DeviceError.unavailable.localizedDescription
         } catch {
@@ -872,9 +902,10 @@ private struct Browser: View {
         previews.reset()
         directoryCache = [:]
         folderSizes = [:]
-        loadedParent = nil
+        content.reset()
         await device.disconnect()
         storages = try await device.connect()
+        deviceSession = await device.sessionIdentifier
         if !storages.contains(where: { $0.id == storage }) { storage = storages.first?.id }
         else { try await reload() }
     }
@@ -1015,7 +1046,7 @@ private struct PreviewTile: View {
         }
         .frame(width: dimension, height: dimension)
         .help("\(entry.name) — \(entry.kind)")
-        .task(id: "\(storage)-\(entry.id)-\(entry.name)-\(entry.size)") {
+        .task(id: "\(store.generation)-\(storage)-\(entry.id)-\(entry.name)-\(entry.size)") {
             preview = nil
             guard !entry.folder else { return }
             preview = await store.image(entry, storage: storage, device: device)

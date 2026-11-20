@@ -10,7 +10,7 @@ final class PreviewStore: ObservableObject {
     private let images = NSCache<NSString, NSImage>()
     private var unavailable = Set<String>()
     private var directory: URL?
-    private var generation = UUID()
+    @Published private(set) var generation = UUID()
 
     init() {
         images.totalCostLimit = 48 * 1024 * 1024
@@ -73,7 +73,10 @@ final class PreviewStore: ObservableObject {
             try Task.checkCancellation()
             guard generation == revision else { return nil }
             if let image { images.setObject(image, forKey: key as NSString, cost: 720 * 720 * 4) }
-            else { unavailable.insert(key) }
+            else {
+                if unavailable.count >= 512 { unavailable.removeAll() }
+                unavailable.insert(key)
+            }
             return image
         } catch is CancellationError { return nil }
         catch {
@@ -87,7 +90,8 @@ final class PreviewStore: ObservableObject {
         guard !entry.folder, !entry.name.isEmpty, entry.name != ".", entry.name != "..",
               !entry.name.contains("/"), !entry.name.utf8.contains(0) else { throw DeviceError.unsafeName }
         let revision = generation
-        let folder = try workspace().appendingPathComponent("\(storage)-\(entry.id)", isDirectory: true)
+        let folder = try workspace().appendingPathComponent("QuickLook", isDirectory: true)
+            .appendingPathComponent("\(storage)-\(entry.id)", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
         let target = folder.appendingPathComponent(entry.name)
@@ -97,6 +101,12 @@ final class PreviewStore: ObservableObject {
         try Task.checkCancellation()
         guard revision == generation else { throw DeviceError.unavailable }
         return target
+    }
+
+    func clearLocalFiles() {
+        if let directory {
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent("QuickLook", isDirectory: true))
+        }
     }
 
     private func workspace() throws -> URL {
