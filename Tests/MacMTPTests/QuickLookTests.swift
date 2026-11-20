@@ -29,7 +29,7 @@ final class QuickLookTests: XCTestCase {
                 modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
                 windowNumber: window.windowNumber, context: nil, characters: characters,
                 charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code))
-            window.sendEvent(event)
+            application.sendEvent(event)
             try await Task.sleep(for: .milliseconds(200))
         }
         XCTAssertEqual(selection, [1])

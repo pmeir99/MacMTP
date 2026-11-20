@@ -278,7 +278,7 @@ actor Device {
             let thumbnail = try exchange(0x100A, [entry.id]).0
             if !thumbnail.isEmpty { return thumbnail }
         } catch DeviceError.rejected(_) {}
-        guard entry.size <= 8 * 1024 * 1024 else { return Data() }
+        guard entry.size <= 24 * 1024 * 1024 else { return Data() }
         return try exchange(0x1009, [entry.id]).0
     }
 

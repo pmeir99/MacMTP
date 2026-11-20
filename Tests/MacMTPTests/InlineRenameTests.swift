@@ -22,7 +22,7 @@ final class InlineRenameTests: XCTestCase {
         application.activate()
         try await Task.sleep(for: .milliseconds(350))
         func key(_ code: UInt16, _ characters: String) throws {
-            window.sendEvent(try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero,
+            application.sendEvent(try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero,
                 modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
                 windowNumber: window.windowNumber, context: nil, characters: characters,
                 charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code)))
@@ -30,8 +30,11 @@ final class InlineRenameTests: XCTestCase {
         try key(125, "\u{F701}")
         try await Task.sleep(for: .milliseconds(150))
         try key(36, "\r")
-        try await Task.sleep(for: .milliseconds(250))
-        let editor = try XCTUnwrap(window.firstResponder as? NSTextView)
+        let deadline = ProcessInfo.processInfo.systemUptime + 3
+        while !(window.firstResponder is NSTextView), ProcessInfo.processInfo.systemUptime < deadline {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        let editor = try XCTUnwrap(window.firstResponder as? NSTextView, "Inline editor must receive focus; responder was \(String(describing: window.firstResponder))")
         XCTAssertEqual(editor.string, "report.txt")
         XCTAssertEqual(editor.selectedRange(), NSRange(location: 0, length: 6), "Preserve the file extension while editing.")
         try key(53, "\u{1b}")

@@ -34,7 +34,7 @@ final class BrowserKeyboardTests: XCTestCase {
                     characters: characters,
                     charactersIgnoringModifiers: characters,
                     isARepeat: false, keyCode: code))
-                window.sendEvent(event)
+                application.sendEvent(event)
                 try await Task.sleep(for: .milliseconds(150))
                 XCTAssertEqual(selected, [expected], "\(layout): native keyboard event must update selection")
             }
@@ -70,7 +70,7 @@ extension BrowserKeyboardTests {
                 modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
                 windowNumber: window.windowNumber, context: nil, characters: characters,
                 charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code))
-            window.sendEvent(event)
+            application.sendEvent(event)
             try await Task.sleep(for: .milliseconds(200))
             XCTAssertEqual(selected, [expected], "Column navigation must retain the active column and hierarchy")
         }

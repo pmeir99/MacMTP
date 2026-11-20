@@ -8,23 +8,37 @@ struct InlineFileName: NSViewRepresentable {
     let completion: (String?) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(completion) }
-    func makeNSView(context: Context) -> NSTextField {
-        let field = NSTextField(string: name)
+    func makeNSView(context: Context) -> EditorField {
+        let field = EditorField(string: name)
+        field.originalName = name
+        field.isFolder = isFolder
         field.isBordered = true
         field.focusRingType = .default
         field.delegate = context.coordinator
-        DispatchQueue.main.async {
-            guard let window = field.window else { return }
-            window.makeFirstResponder(field)
-            if let editor = field.currentEditor() {
-                let suffix = isFolder ? "" : (name as NSString).pathExtension
-                let length = (name as NSString).length - (suffix.isEmpty ? 0 : (suffix as NSString).length + 1)
-                editor.selectedRange = NSRange(location: 0, length: max(0, length))
-            }
-        }
         return field
     }
-    func updateNSView(_ view: NSTextField, context: Context) {}
+    func updateNSView(_ view: EditorField, context: Context) {}
+
+    final class EditorField: NSTextField {
+        var originalName = ""
+        var isFolder = false
+        private var focusedOnce = false
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard window != nil, !focusedOnce else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.window != nil, !self.focusedOnce else { return }
+                self.focusedOnce = true
+                self.selectText(nil)
+                if let editor = self.currentEditor() {
+                    let suffix = self.isFolder ? "" : (self.originalName as NSString).pathExtension
+                    let length = (self.originalName as NSString).length - (suffix.isEmpty ? 0 : (suffix as NSString).length + 1)
+                    editor.selectedRange = NSRange(location: 0, length: max(0, length))
+                }
+            }
+        }
+    }
 
     final class Coordinator: NSObject, NSTextFieldDelegate {
         private var finished = false

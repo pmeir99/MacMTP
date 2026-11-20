@@ -126,9 +126,18 @@ struct Browser: View {
 
     private var parent: UInt32 { folders.last?.id ?? UInt32.max }
     private var selected: [Entry] {
-        var seen = Set<UInt32>()
-        return (entries + folders + directoryCache.values.flatMap { $0 })
-            .filter { selection.contains($0.id) && seen.insert($0.id).inserted }
+        guard !selection.isEmpty else { return [] }
+        var pending = selection
+        var result: [Entry] = []
+        for item in entries + folders where pending.remove(item.id) != nil {
+            result.append(item)
+        }
+        if pending.isEmpty { return result }
+        for items in directoryCache.values {
+            for item in items where pending.remove(item.id) != nil { result.append(item) }
+            if pending.isEmpty { break }
+        }
+        return result
     }
     private var visible: [Entry] {
         entries.filter {
@@ -168,6 +177,7 @@ struct Browser: View {
                                            description: Text(connectionMessage))
                 } else {
                     browserContent
+                        .background(FileKeyboard(handle: handleNativeKey))
                         .focusable()
                         .focusEffectDisabled()
                         .focused($fileAreaFocused)
@@ -331,8 +341,8 @@ struct Browser: View {
                 do { try await Task.sleep(for: .seconds(6)) } catch { return }
             }
         }
-        .task(id: "\(listingVersion)-\(calculateFolderSizes)") {
-            if calculateFolderSizes { await measureFolders() }
+        .task(id: "\(listingVersion)-\(calculateFolderSizes)-\(busy)") {
+            if calculateFolderSizes && !busy { await measureFolders() }
         }
         .quickLookPreview($previewURL)
         .onChange(of: previewURL) { _, url in
@@ -411,6 +421,7 @@ struct Browser: View {
     }
 
     private var columnContent: some View {
+        ScrollViewReader { columns in
             ScrollView(.horizontal) {
                 HStack(spacing: 0) {
                     ForEach(0...folders.count, id: \.self) { index in
@@ -444,6 +455,7 @@ struct Browser: View {
                         }
                         }
                         .frame(width: 225)
+                        .id("column-\(index)")
                         Divider()
                     }
                     if let item = selected.first, !loading {
@@ -453,6 +465,10 @@ struct Browser: View {
                 .scrollTargetLayout()
             }
             .defaultScrollAnchor(.trailing, for: .sizeChanges)
+            .onChange(of: activeColumn) { _, index in
+                columns.scrollTo("column-\(index)", anchor: .leading)
+            }
+        }
     }
 
     private var iconContent: some View {
