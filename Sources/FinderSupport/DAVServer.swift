@@ -118,7 +118,10 @@ public final class DAVServer: @unchecked Sendable {
                         let request = DAVRequest(method: head.method, target: head.target, headers: head.headers, body: self.body)
                         self.task = Task {
                             let response = await self.service.respond(request, workspace: self.workspace)
-                            self.queue.async { if !self.closed { self.send(response, headOnly: head.method == "HEAD") } }
+                            self.queue.async {
+                                if !self.closed { self.send(response, headOnly: head.method == "HEAD") }
+                                else { response.download?.cancel() }
+                            }
                         }
                     } else if finished || error != nil { self.close() }
                     else { self.receive() }

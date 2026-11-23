@@ -106,6 +106,13 @@ public actor DAVService {
     private let backend: any DAVBackend
     private let authority: String
     private let writable: Bool
+    private let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss 'GMT'"
+        return formatter
+    }()
     private var occupied = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private struct Lock { let path: DAVPath; let token: String; var expires: Date; let recursive: Bool }
@@ -173,7 +180,7 @@ public actor DAVService {
             let xml = "<?xml version=\"1.0\" encoding=\"utf-8\"?><D:multistatus xmlns:D=\"DAV:\">" + items.map { item in
                 let kind = item.directory ? "<D:collection/>" : ""
                 let supported = writable ? "<D:lockentry><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockentry>" : ""
-                let date = item.modified.map(Self.httpDate) ?? Self.httpDate(Date(timeIntervalSince1970: 0))
+                let date = dateFormatter.string(from: item.modified ?? Date(timeIntervalSince1970: 0))
                 return "<D:response><D:href>\(Self.escape(href(item.path, directory: item.directory)))</D:href><D:propstat><D:prop><D:displayname>\(Self.escape(item.path.name))</D:displayname><D:resourcetype>\(kind)</D:resourcetype><D:getcontentlength>\(item.size)</D:getcontentlength><D:getlastmodified>\(date)</D:getlastmodified><D:getetag>\(Self.escape(item.etag))</D:getetag><D:getcontenttype>\(item.directory ? "httpd/unix-directory" : "application/octet-stream")</D:getcontenttype><D:supportedlock>\(supported)</D:supportedlock><D:lockdiscovery/></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>"
             }.joined() + "</D:multistatus>"
             return DAVResponse(207, headers: ["Content-Type": "application/xml; charset=utf-8"], data: Data(xml.utf8))
@@ -249,10 +256,6 @@ public actor DAVService {
     }
     public static func escape(_ value: String) -> String {
         value.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;")
-    }
-    private static func httpDate(_ date: Date) -> String {
-        let format = DateFormatter(); format.locale = Locale(identifier: "en_US_POSIX"); format.timeZone = TimeZone(secondsFromGMT: 0); format.dateFormat = "EEE, dd MMM yyyy HH:mm:ss 'GMT'"
-        return format.string(from: date)
     }
     public static func byteRange(_ value: String, size: UInt64) throws -> ClosedRange<UInt64> {
         guard size > 0, value.hasPrefix("bytes="), !value.contains(",") else { throw DAVError(416, "Invalid range") }
