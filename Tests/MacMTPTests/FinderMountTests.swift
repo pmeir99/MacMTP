@@ -21,12 +21,14 @@ private actor TestPhone: DAVBackend {
             }
             return .items(result)
         case .read(let path, let target, _):
-            try FileManager.default.copyItem(at: url(path), to: target); return .file(try item(path))
+            try Data(contentsOf: url(path)).write(to: target); return .file(try item(path))
         case .put(let path, let source, _, let absent):
             let exists = FileManager.default.fileExists(atPath: url(path).path)
             if absent && exists { throw DAVError(412, "Exists") }
             try Data(contentsOf: source).write(to: url(path), options: .atomic)
             return .changed(created: !exists)
+        case .copy(let path, let target, _):
+            try FileManager.default.copyItem(at: url(path), to: url(target)); return .changed(created: true)
         case .mkdir(let path):
             try FileManager.default.createDirectory(at: url(path), withIntermediateDirectories: false); return .changed(created: true)
         case .delete(let path, _):
@@ -43,6 +45,32 @@ final class FinderMountTests: XCTestCase {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
         addTeardownBlock { try? FileManager.default.removeItem(at: url) }
         return url
+    }
+    func testInterruptedReplacementPreservesOriginalAndCleansStaging() throws {
+        var files: [UInt32: String] = [1: "report.pdf", 2: ".upload"]
+        enum Failure: Error { case injected }
+        XCTAssertThrowsError(try FinderReplacement.commit(staged: 2, original: 1, name: "report.pdf", rename: { id, name in
+            if id == 2 { throw Failure.injected }
+            files[id] = name
+        }, remove: { files.removeValue(forKey: $0) }))
+        XCTAssertEqual(files, [1: "report.pdf"])
+
+        files = [1: "report.pdf", 2: ".upload"]
+        XCTAssertThrowsError(try FinderReplacement.commit(staged: 2, original: 1, name: "report.pdf", rename: { id, name in
+            if id == 2 || name == "report.pdf" { throw Failure.injected }
+            files[id] = name
+        }, remove: { files.removeValue(forKey: $0) }))
+        XCTAssertTrue(try XCTUnwrap(files[1]).hasPrefix(".macmtp-backup-"))
+        XCTAssertNil(files[2])
+    }
+    func testSuccessfulReplacementAndBackupCleanupFailureRetainNewFile() throws {
+        var files: [UInt32: String] = [1: "report.pdf", 2: ".upload"]
+        try FinderReplacement.commit(staged: 2, original: 1, name: "report.pdf", rename: { files[$0] = $1 }, remove: { files.removeValue(forKey: $0) })
+        XCTAssertEqual(files, [2: "report.pdf"])
+        files = [1: "report.pdf", 2: ".upload"]
+        XCTAssertThrowsError(try FinderReplacement.commit(staged: 2, original: 1, name: "report.pdf", rename: { files[$0] = $1 }, remove: { _ in throw CocoaError(.fileWriteNoPermission) }))
+        XCTAssertEqual(files[2], "report.pdf")
+        XCTAssertTrue(try XCTUnwrap(files[1]).hasPrefix(".macmtp-backup-"))
     }
     func testHTTPStreamingAndAmbiguousFraming() throws {
         let root = try workspace()
@@ -94,11 +122,13 @@ final class FinderMountTests: XCTestCase {
             let (data, response) = try await URLSession.shared.data(for: request)
             return (data, try XCTUnwrap(response as? HTTPURLResponse))
         }
+        let unicode = "שלום <&>.txt"
+        try Data("unicode".utf8).write(to: root.appendingPathComponent(unicode))
         let put = try await request("PUT", "file.txt", data: Data("hello".utf8)); XCTAssertEqual(put.1.statusCode, 201)
         let get = try await request("GET", "file.txt"); XCTAssertEqual(get.0, Data("hello".utf8))
         let range = try await request("GET", "file.txt", headers: ["Range": "bytes=1-3"]); XCTAssertEqual(range.1.statusCode, 206); XCTAssertEqual(range.0, Data("ell".utf8))
         let exists = try await request("PUT", "file.txt", data: Data("bad".utf8), headers: ["If-None-Match": "*"]); XCTAssertEqual(exists.1.statusCode, 412)
-        let listing = try await request("PROPFIND", "", headers: ["Depth": "1"]); XCTAssertEqual(listing.1.statusCode, 207); XCTAssertTrue(String(decoding: listing.0, as: UTF8.self).contains("file.txt"))
+        let listing = try await request("PROPFIND", "", headers: ["Depth": "1"]); XCTAssertEqual(listing.1.statusCode, 207); XCTAssertTrue(String(decoding: listing.0, as: UTF8.self).contains("file.txt")); XCTAssertTrue(String(decoding: listing.0, as: UTF8.self).contains("שלום &lt;&amp;&gt;.txt"))
         let invalid = try await request("PROPFIND", "", headers: ["Depth": "infinity"]); XCTAssertEqual(invalid.1.statusCode, 403)
         let lockXML = Data("<D:lockinfo xmlns:D=\"DAV:\"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>".utf8)
         let lock = try await request("LOCK", "file.txt", data: lockXML, headers: ["Depth": "0"])

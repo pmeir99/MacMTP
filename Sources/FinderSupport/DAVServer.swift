@@ -71,6 +71,7 @@ public final class DAVServer: @unchecked Sendable {
         private let body: URL
         private let input: FileHandle
         private let parser: DAVHTTPParser
+        private var download: DAVDownload?
         private var output: FileHandle?
         private var sendRemaining: UInt64 = 0
         private var closed = false
@@ -127,6 +128,7 @@ public final class DAVServer: @unchecked Sendable {
         }
         private func send(_ response: DAVResponse, headOnly: Bool) {
             do {
+                download = response.download
                 var headers = response.headers
                 let length = response.length ?? UInt64(response.data.count)
                 headers["Content-Length"] = String(length); headers["Connection"] = "close"; headers["Cache-Control"] = "no-store"
@@ -145,18 +147,27 @@ public final class DAVServer: @unchecked Sendable {
         }
         private func sendFile() {
             guard !closed else { return }
+            let state = download?.state() ?? (finished: true, failed: false)
+            if state.failed { close(); return }
             if sendRemaining == 0 { close(); return }
+            if !state.finished && sendRemaining == 1 { waitForDownload(); return }
+            let allowed = state.finished ? sendRemaining : sendRemaining - 1
             do {
-                guard let bytes = try output?.read(upToCount: Int(min(sendRemaining, 256 * 1024))), !bytes.isEmpty else { close(); return }
+                guard let bytes = try output?.read(upToCount: Int(min(allowed, 256 * 1024))), !bytes.isEmpty else {
+                    if state.finished { close() } else { waitForDownload() }; return
+                }
                 sendRemaining -= UInt64(bytes.count)
                 connection.send(content: bytes, completion: .contentProcessed { [weak self] error in
                     if error != nil { self?.close() } else { self?.sendFile() }
                 })
             } catch { close() }
         }
+        private func waitForDownload() {
+            queue.asyncAfter(deadline: .now() + .milliseconds(20)) { [weak self] in self?.sendFile() }
+        }
         func close() {
             guard !closed else { return }; closed = true
-            connection.cancel(); task?.cancel()
+            connection.cancel(); task?.cancel(); download?.cancel()
             try? input.close(); try? output?.close()
             // A running USB operation must finish before deleting its staging directory.
             if let task { let workspace = workspace; Task { await task.value; try? FileManager.default.removeItem(at: workspace) } }

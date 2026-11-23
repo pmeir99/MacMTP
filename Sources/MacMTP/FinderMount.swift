@@ -8,7 +8,19 @@ private struct PhoneMountBackend: DAVBackend {
     let session: UUID
     let storages: [Storage]
     func perform(_ operation: DAVOperation) async throws -> DAVResult {
-        try await device.finderOperation(operation, session: session, storages: storages)
+        do { return try await device.finderOperation(operation, session: session, storages: storages) }
+        catch DeviceError.rejected(let code) {
+            let status: Int
+            switch code {
+            case 0x2005: status = 501 // Operation not supported by this phone.
+            case 0x2009: status = 404 // Stale or missing object handle.
+            case 0x200C: status = 507 // Storage full.
+            case 0x200E, 0x200F: status = 403 // Read-only storage or access denied.
+            case 0x201A: status = 409 // Invalid parent.
+            default: status = 503
+            }
+            throw DAVError(status, DeviceError.rejected(code).localizedDescription)
+        }
     }
 }
 
@@ -105,6 +117,7 @@ final class FinderMountController: ObservableObject {
         let process = Process(); process.executableURL = URL(fileURLWithPath: executable); process.arguments = arguments
         let errors = Pipe(); process.standardError = errors; process.standardOutput = FileHandle.nullDevice
         try process.run()
+        defer { if process.isRunning { process.terminate() } }
         let deadline = Date().addingTimeInterval(timeout)
         while process.isRunning {
             if Task.isCancelled || Date() >= deadline {

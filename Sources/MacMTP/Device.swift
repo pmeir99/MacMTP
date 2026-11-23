@@ -556,11 +556,14 @@ extension Device {
             }
             return .items(items)
         case .read(let path, let output, let match):
-            let (storage, entry) = try resolve(path)
+            let (_, entry) = try resolve(path)
             guard let entry, !entry.folder else { throw DAVError(405, "Not a file") }
             try check(entry, path: path, match: match)
-            // The existing downloader writes a private temporary file and only publishes it on success.
-            try download(entry, storage: storage.id, into: output.deletingLastPathComponent(), filename: output.lastPathComponent) { _ in }
+            let file = try FileHandle(forWritingTo: output)
+            defer { try? file.close() }
+            _ = try exchange(0x1009, [entry.id], download: file)
+            guard try file.offset() == UInt64(entry.size) else { throw DeviceError.malformed }
+            try file.synchronize()
             return .file(item(path, entry))
         case .mkdir(let path):
             let (storage, parent, existing) = try destination(path)
@@ -583,25 +586,52 @@ extension Device {
             let stagingName = ".macmtp-upload-\(UUID().uuidString)"
             let handle = try create(stagingName, storage: storage.id, parent: parent, size: UInt32(size), folder: false)
             let staged = Entry(id: handle, name: stagingName, folder: false, size: UInt32(size), modified: nil)
-            var published = false
-            defer { if !published { try? remove(staged) } }
+            var handedOff = false
+            defer { if !handedOff { try? remove(staged) } }
             let input = try FileHandle(forReadingFrom: source); defer { try? input.close() }
             _ = try exchange(0x100D, upload: (input, size))
             try Task.checkCancellation()
-            // Upload first. Keep the original on the phone until the new name is committed.
-            if let existing {
-                let backup = ".macmtp-backup-\(UUID().uuidString)"
-                try rename(existing, to: backup)
-                do { try rename(staged, to: path.name); published = true }
-                catch {
-                    do { try rename(existing, to: path.name) }
-                    catch { throw DAVError(503, "Replacement failed. The original is preserved as \(backup). Reconnect before retrying.") }
-                    throw error
-                }
-                do { try remove(existing) }
-                catch { throw DAVError(503, "The new file was saved, but the original backup \(backup) could not be removed. Refresh before retrying.") }
-            } else { try rename(staged, to: path.name); published = true }
+            handedOff = true
+            try FinderReplacement.commit(staged: staged.id, original: existing?.id, name: path.name,
+                rename: { id, name in
+                    let entry = id == staged.id ? staged : existing!
+                    try self.rename(entry, to: name)
+                }, remove: { id in
+                    let entry = id == staged.id ? staged : existing!
+                    try self.remove(entry)
+                })
             return .changed(created: existing == nil)
+        case .copy(let path, let target, let overwrite):
+            try protect(path); try protect(target)
+            guard !path.contains(target) else { throw DAVError(409, "Cannot copy an item into itself") }
+            let (sourceStorage, source) = try resolve(path)
+            guard let source else { throw DAVError(403, "Storage roots are protected") }
+            let (targetStorage, parent, existing) = try destination(target)
+            guard existing == nil || overwrite else { throw DAVError(412, "Destination exists") }
+            guard existing?.folder != true, !source.folder || existing == nil else { throw DAVError(409, "Destination exists. Choose a new name for the copied folder.") }
+            let workspace = FileManager.default.temporaryDirectory.appendingPathComponent("MacMTP-Copy-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            defer { try? FileManager.default.removeItem(at: workspace) }
+            let stagingName = ".macmtp-copy-\(UUID().uuidString)"
+            let local = workspace.appendingPathComponent(stagingName)
+            try download(source, storage: sourceStorage.id, into: workspace, filename: stagingName) { _ in }
+            if !source.folder {
+                return try finderOperation(.put(target, from: local, match: existing.map { item(target, $0).etag }, absent: !overwrite), session: session, storages: storages)
+            }
+            var staged: Entry?
+            var published = false
+            defer {
+                if !published {
+                    if staged == nil { staged = try? readDirectory(storage: targetStorage.id, parent: parent).first(where: { $0.name == stagingName }) }
+                    if let staged { try? remove(staged) }
+                }
+            }
+            try upload(local, storage: targetStorage.id, parent: parent) { _ in }
+            staged = try readDirectory(storage: targetStorage.id, parent: parent).first(where: { $0.name == stagingName })
+            guard let staged else { throw DeviceError.malformed }
+            try Task.checkCancellation()
+            try rename(staged, to: target.name); published = true
+            return .changed(created: true)
         case .move(let path, let target, let overwrite, let match):
             try protect(path); try protect(target)
             if path == target { return .changed(created: false) }

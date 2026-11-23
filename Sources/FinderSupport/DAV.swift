@@ -30,6 +30,7 @@ public enum DAVOperation: Sendable {
     case inspect(DAVPath, children: Bool)
     case read(DAVPath, to: URL, match: String?)
     case put(DAVPath, from: URL, match: String?, absent: Bool)
+    case copy(DAVPath, DAVPath, overwrite: Bool)
     case mkdir(DAVPath)
     case delete(DAVPath, match: String?)
     case move(DAVPath, DAVPath, overwrite: Bool, match: String?)
@@ -62,10 +63,35 @@ public struct DAVRequest: Sendable {
     }
 }
 
+/// Streams a private staging file while the phone fills it. The last byte is
+/// withheld until MTP reports success, so a failed USB transaction cannot look complete.
+public final class DAVDownload: @unchecked Sendable {
+    private let lock = NSLock()
+    private var finished = false
+    private var failed = false
+    private var task: Task<Void, Never>?
+    public init(operation: @escaping @Sendable () async throws -> Void) {
+        task = Task {
+            var failed = false
+            do { try Task.checkCancellation(); try await operation() } catch { failed = true }
+            self.complete(failed: failed)
+        }
+    }
+    private func complete(failed: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        self.failed = failed; finished = true
+    }
+    public func state() -> (finished: Bool, failed: Bool) {
+        lock.lock(); defer { lock.unlock() }; return (finished, failed)
+    }
+    public func cancel() { task?.cancel() }
+}
+
 public struct DAVResponse: Sendable {
     public var status: Int
     public var headers: [String: String] = [:]
     public var data = Data()
+    public var download: DAVDownload?
     public var file: URL?
     public var offset: UInt64 = 0
     public var length: UInt64?
@@ -114,6 +140,7 @@ public actor DAVService {
     public nonisolated func validateHead(_ head: DAVHTTPParser.Head) throws {
         guard head.headers["host"] == authority, head.headers["origin"] == nil else { throw DAVError(403, "Local Finder access only") }
         _ = try path(head.target)
+        if let encoding = head.headers["content-encoding"], encoding.lowercased() != "identity" { throw DAVError(415, "Compressed request bodies are unsupported") }
         if let expect = head.headers["expect"], expect.lowercased() != "100-continue" { throw DAVError(417, "Unsupported expectation") }
     }
     private func href(_ path: DAVPath, directory: Bool) -> String {
@@ -125,15 +152,15 @@ public actor DAVService {
         guard r.headers["host"] == authority, r.headers["origin"] == nil else { throw DAVError(403, "Local Finder access only") }
         let path = try path(r.target)
         locks.removeAll { $0.expires <= Date() }
-        let methods = writable ? "OPTIONS, PROPFIND, GET, HEAD, PUT, MKCOL, DELETE, MOVE, LOCK, UNLOCK" : "OPTIONS, PROPFIND, GET, HEAD"
+        let methods = writable ? "OPTIONS, PROPFIND, GET, HEAD, PUT, MKCOL, DELETE, MOVE, COPY, LOCK, UNLOCK" : "OPTIONS, PROPFIND, GET, HEAD"
         if r.method == "OPTIONS" {
             return DAVResponse(200, headers: ["DAV": writable ? "1, 2" : "1", "Allow": methods, "MS-Author-Via": "DAV"])
         }
         if !["GET", "HEAD", "PROPFIND"].contains(r.method) {
             guard writable else { throw DAVError(403, "Finder changes are disabled") }
             let provided = (r.headers["if"] ?? "") + (r.headers["lock-token"] ?? "")
-            for lock in locks where lock.path == path || (lock.recursive && lock.path.contains(path)) ||
-                (["DELETE", "MOVE"].contains(r.method) && path.contains(lock.path)) {
+            for lock in locks where r.method != "COPY" && (lock.path == path || (lock.recursive && lock.path.contains(path)) ||
+                (["DELETE", "MOVE"].contains(r.method) && path.contains(lock.path))) {
                 guard provided.contains("<\(lock.token)>") else { throw DAVError(423, "Item is locked") }
             }
         }
@@ -152,22 +179,23 @@ public actor DAVService {
             return DAVResponse(207, headers: ["Content-Type": "application/xml; charset=utf-8"], data: Data(xml.utf8))
         case "GET", "HEAD":
             let output = workspace.appendingPathComponent("download")
-            let result = try await backend.perform(r.method == "HEAD" ? .inspect(path, children: false) : .read(path, to: output, match: r.headers["if-match"]))
-            let item: DAVItem
-            switch result {
-            case .items(let items): guard let first = items.first else { throw DAVError(404, "Not found") }; item = first
-            case .file(let value): item = value
-            default: throw DAVError(500, "Invalid file")
-            }
+            guard case .items(let items) = try await backend.perform(.inspect(path, children: false)), let item = items.first else { throw DAVError(404, "Not found") }
             guard !item.directory || r.method == "HEAD" else { throw DAVError(405, "Open folders in Finder") }
-            if r.headers["if-none-match"] == item.etag { return DAVResponse(304, headers: ["ETag": item.etag]) }
+            if let match = r.headers["if-match"], match != "*", match != item.etag { throw DAVError(412, "The file changed") }
+            if r.headers["if-none-match"] == item.etag || r.headers["if-none-match"] == "*" { return DAVResponse(304, headers: ["ETag": item.etag]) }
             var response = DAVResponse(200, headers: ["ETag": item.etag, "Accept-Ranges": "bytes", "Content-Type": "application/octet-stream"])
             response.length = item.size
-            if r.method == "GET" { response.file = output }
             if let range = r.headers["range"], r.method == "GET" {
                 let bounds = try Self.byteRange(range, size: item.size)
                 response.status = 206; response.offset = bounds.lowerBound; response.length = bounds.upperBound - bounds.lowerBound + 1
                 response.headers["Content-Range"] = "bytes \(bounds.lowerBound)-\(bounds.upperBound)/\(item.size)"
+            }
+            if r.method == "GET" {
+                guard FileManager.default.createFile(atPath: output.path, contents: nil, attributes: [.posixPermissions: 0o600]) else { throw DAVError(507, "Cannot stage this download") }
+                response.file = output
+                let backend = backend
+                if item.size == 0 { _ = try await backend.perform(.read(path, to: output, match: item.etag)) }
+                else { response.download = DAVDownload { _ = try await backend.perform(.read(path, to: output, match: item.etag)) } }
             }
             return response
         case "PUT":
@@ -179,13 +207,17 @@ public actor DAVService {
             guard size == 0 else { throw DAVError(415, "MKCOL bodies are unsupported") }
             return try await mutation(.mkdir(path))
         case "DELETE": return try await mutation(.delete(path, match: r.headers["if-match"]))
-        case "MOVE":
+        case "MOVE", "COPY":
             guard let destination = r.headers["destination"], let url = URLComponents(string: destination),
                   url.scheme == "http", url.host == "127.0.0.1", "127.0.0.1:\(url.port ?? 80)" == authority,
                   url.user == nil, url.password == nil, url.query == nil, url.fragment == nil else { throw DAVError(502, "Destination must be on this phone mount") }
             let target = try self.path(url.percentEncodedPath)
             for lock in locks where lock.path.contains(target) || target.contains(lock.path) {
                 guard (r.headers["if"] ?? "").contains("<\(lock.token)>") else { throw DAVError(423, "Destination is locked") }
+            }
+            if r.method == "COPY" {
+                guard r.headers["depth"] == nil || r.headers["depth"] == "infinity" else { throw DAVError(501, "Only complete copies are supported") }
+                return try await mutation(.copy(path, target, overwrite: r.headers["overwrite"] != "F"))
             }
             return try await mutation(.move(path, target, overwrite: r.headers["overwrite"] != "F", match: r.headers["if-match"]))
         case "LOCK":
