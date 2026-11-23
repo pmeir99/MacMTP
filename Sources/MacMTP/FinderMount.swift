@@ -7,6 +7,7 @@ private struct PhoneMountBackend: DAVBackend {
     let device: Device
     let session: UUID
     let storages: [Storage]
+    let report: @Sendable (String) -> Void
     func perform(_ operation: DAVOperation) async throws -> DAVResult {
         do { return try await device.finderOperation(operation, session: session, storages: storages) }
         catch DeviceError.rejected(let code) {
@@ -19,8 +20,21 @@ private struct PhoneMountBackend: DAVBackend {
             case 0x201A: status = 409 // Invalid parent.
             default: status = 503
             }
-            throw DAVError(status, DeviceError.rejected(code).localizedDescription)
+            let error = DAVError(status, DeviceError.rejected(code).localizedDescription)
+            reportIfNeeded(operation, error: error)
+            throw error
+        } catch {
+            reportIfNeeded(operation, error: error)
+            throw error
         }
+    }
+    private func reportIfNeeded(_ operation: DAVOperation, error: Error) {
+        switch operation {
+        case .inspect, .read:
+            if let failure = error as? DAVError, failure.status < 500 { return }
+        default: break
+        }
+        report(error.localizedDescription)
     }
 }
 
@@ -51,7 +65,9 @@ final class FinderMountController: ObservableObject {
             let storages = try await device.connect()
             guard !storages.isEmpty else { throw DeviceError.unavailable }
             let session = await device.sessionIdentifier
-            let backend = PhoneMountBackend(device: device, session: session, storages: storages)
+            let backend = PhoneMountBackend(device: device, session: session, storages: storages, report: { message in
+                Task { @MainActor in FinderMountController.shared.failure = message }
+            })
             let server = try DAVServer(backend: backend, writable: writable)
             self.server = server
             let address = try await server.start()

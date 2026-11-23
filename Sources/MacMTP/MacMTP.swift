@@ -315,10 +315,10 @@ struct Browser: View {
             if finderMount.ownsDevice {
                 VStack(spacing: 12) {
                     Image(systemName: "externaldrive.connected.to.line.below").font(.largeTitle)
-                    Text("Phone mounted in Finder").font(.title2)
+                    Text(finderMount.location == nil ? "Preparing Finder mount…" : "Phone mounted in Finder").font(.title2)
                     Text("Browse and transfer files in Finder. Eject the phone to resume browsing here.")
                         .foregroundStyle(.secondary)
-                    Button("Open in Finder") { finderMount.open() }
+                    Button("Open in Finder") { finderMount.open() }.disabled(finderMount.location == nil)
                     Button("Eject Phone") { Task { await finderMount.unmount() } }
                         .disabled(finderMount.changing)
                     if let error = finderMount.failure { Text(error).foregroundStyle(.red).textSelection(.enabled) }
