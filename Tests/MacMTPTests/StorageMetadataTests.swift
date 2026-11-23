@@ -40,6 +40,15 @@ final class StorageMetadataTests: XCTestCase {
         XCTAssertThrowsError(try StorageMetadata.decode(Data(repeating: 0, count: 26), id: 1))
     }
 
+    func testInternalStorageComesFirstWithoutReorderingCards() {
+        let items = [Storage(id: 4, name: "Unknown"),
+                     Storage(id: 3, name: "Card B", kind: .removable),
+                     Storage(id: 2, name: "Phone", kind: .internalStorage),
+                     Storage(id: 1, name: "Card A", kind: .removable)]
+        XCTAssertEqual(Storage.ordered(items).map(\.id), [2, 3, 1, 4])
+        XCTAssertTrue(Storage.ordered([]).isEmpty)
+    }
+
     func testStorageSymbolsExistInSystemLibrary() {
         for kind in [Storage.Kind.internalStorage, .removable, .unknown] {
             XCTAssertNotNil(NSImage(systemSymbolName: kind.symbol, accessibilityDescription: nil))

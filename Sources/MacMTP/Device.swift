@@ -6,6 +6,13 @@ struct Storage: Identifiable, Sendable {
     let name: String
     var kind: Kind = .unknown
 
+    /// Preserve the device's order within each group, including unknown storage types.
+    static func ordered(_ storages: [Storage]) -> [Storage] {
+        storages.filter { $0.kind == .internalStorage }
+        + storages.filter { $0.kind == .removable }
+        + storages.filter { $0.kind == .unknown }
+    }
+
     enum Kind: Equatable, Sendable {
         case internalStorage, removable, unknown
 
@@ -213,9 +220,9 @@ actor Device {
             catch { reset(); throw error }
         }
         var list = Reader(data: try exchange(0x1004).0)
-        return try list.handles().map { id in
+        return try Storage.ordered(list.handles().map { id in
             try StorageMetadata.decode(exchange(0x1005, [id]).0, id: id)
-        }
+        })
     }
 
     func invalidateDirectories() { cachedDirectories.removeAll() }

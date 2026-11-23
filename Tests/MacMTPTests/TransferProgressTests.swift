@@ -52,6 +52,23 @@ final class TransferProgressTests: XCTestCase {
         XCTAssertEqual(transfer.snapshot().remaining, 0)
     }
 
+    func testSuccessfulTransferDismissalDeadlineAndFailureRetention() throws {
+        let transfer = TransferProgress(title: "Download")
+        XCTAssertNil(transfer.snapshot().dismissalDelay(at: 0))
+        transfer.begin(TransferSize(bytes: 10, files: 1))
+        XCTAssertNil(transfer.snapshot().dismissalDelay(at: 0))
+        transfer.finish()
+        let snapshot = transfer.snapshot()
+        let completed = try XCTUnwrap(snapshot.completedAt)
+        XCTAssertEqual(try XCTUnwrap(snapshot.dismissalDelay(at: completed)), 1, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(snapshot.dismissalDelay(at: completed + 0.5)), 0.5, accuracy: 0.0001)
+        XCTAssertEqual(snapshot.dismissalDelay(at: completed + 1), 0)
+        XCTAssertEqual(snapshot.dismissalDelay(at: completed + 2), 0)
+        let failed = TransferProgress(title: "Failed")
+        failed.finish(error: CocoaError(.fileWriteOutOfSpace))
+        XCTAssertNil(failed.snapshot().dismissalDelay(at: completed + 100))
+    }
+
     func testThroughputUsesElapsedTime() {
         var snapshot = TransferProgress.Snapshot()
         snapshot.samples = [(10, 100), (12, 4_000_100)]

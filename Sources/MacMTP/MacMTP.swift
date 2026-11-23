@@ -28,7 +28,15 @@ struct MacMTPApp: App {
                 }
             }
 
-        Settings { SoftwareUpdateView(updater: updater) }
+        Settings {
+            TabView {
+                GeneralSettingsView()
+                    .tabItem { Label("General", systemImage: "gearshape") }
+                SoftwareUpdateView(updater: updater)
+                    .tabItem { Label("Software Update", systemImage: "arrow.triangle.2.circlepath") }
+            }
+            .frame(width: 510)
+        }
     }
 }
 
@@ -107,7 +115,7 @@ struct Browser: View {
     @State private var renaming: Entry?
     @State private var naming = false
     @State private var deleting = false
-    @State private var showHidden = false
+    @AppStorage("showHiddenFiles") private var showHidden = false
     private enum Layout: String, CaseIterable {
         case icons = "Icons", list = "List", columns = "Columns", gallery = "Gallery"
 
@@ -216,8 +224,11 @@ struct Browser: View {
                 if !transfers.isEmpty {
                     Divider()
                     ScrollView {
-                        LazyVStack(spacing: 0) {
-                            ForEach(transfers) { TransferProgressView(transfer: $0) }
+                        VStack(spacing: 0) {
+                            ForEach(transfers) { transfer in
+                                TransferProgressView(transfer: transfer)
+                                    .task { await dismissCompletedTransfer(transfer) }
+                            }
                         }
                     }
                     .frame(height: min(CGFloat(transfers.count) * 104, 208))
@@ -1145,8 +1156,24 @@ struct Browser: View {
     }
 
     @MainActor
+    private func dismissCompletedTransfer(_ transfer: TransferProgress) async {
+        do {
+            while !Task.isCancelled {
+                let snapshot = transfer.snapshot()
+                if let delay = snapshot.dismissalDelay(at: ProcessInfo.processInfo.systemUptime) {
+                    try await Task.sleep(for: .seconds(delay))
+                    transfers.removeAll { $0.id == transfer.id }
+                    return
+                }
+                if case .failed = snapshot.phase { return }
+                try await Task.sleep(for: .milliseconds(100))
+            }
+        } catch { /* The transfer view was removed. */ }
+    }
+
+    @MainActor
     private func addTransfer(_ title: String) -> TransferProgress {
-        // Keep active transfers and the most recent completed operations.
+        // Successful transfers dismiss automatically; bound retained failure cards.
         if transfers.count >= 10 {
             transfers.removeAll {
                 switch $0.snapshot().phase {

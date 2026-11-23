@@ -49,11 +49,11 @@ body = """Native Android file transfer for Apple Silicon Macs running macOS 27 o
 
 Download **MacMTP.dmg** for installation, or unzip **MacMTP.zip** and move MacMTP.app into Applications.
 
-Refines storage icons and Quick Look presentation:
-- Internal/shared storage uses the internal-drive SF Symbol; removable storage uses the SD-card SF Symbol.
-- Classification uses the device’s MTP StorageType metadata. Unknown storage types retain a generic drive icon, and storage names are preserved.
-- Removes the Quick Look button from the file preview pane. Space continues to open native Quick Look.
-- Preparing a Quick Look preview no longer creates a transfer-progress card. Upload and download progress remains unchanged.
+Refines browsing and transfer feedback:
+- Internal phone storage appears first, followed by removable cards, with metadata-based SF Symbols.
+- Successful upload and download progress cards disappear one second after completion. Failed transfers remain visible for troubleshooting.
+- Settings > General includes a persistent Show hidden files and folders option, synchronized with the View menu and applied to all four browsing modes.
+- Hidden-file visibility does not expand Android USB permissions. MacMTP requests all file types exposed by the phone's MTP service; protected system files and installed-app extraction are not exposed through standard MTP.
 
 Includes the existing USB driver-conflict recovery and updater quit/relaunch fixes.
 

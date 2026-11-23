@@ -29,6 +29,13 @@ final class TransferProgress: Identifiable, @unchecked Sendable {
         var files = 0
         var filename = ""
         var started: TimeInterval = 0
+        var completedAt: TimeInterval?
+
+        /// Only successful transfers expire; failures retain their diagnostic text.
+        func dismissalDelay(at now: TimeInterval) -> TimeInterval? {
+            guard case .complete = phase, let completedAt else { return nil }
+            return max(0, completedAt + 1 - now)
+        }
         var samples: [(time: TimeInterval, bytes: UInt64)] = []
 
         var speed: Double {
@@ -57,6 +64,7 @@ final class TransferProgress: Identifiable, @unchecked Sendable {
         defer { lock.unlock() }
         state.total = total
         state.phase = .copying
+        state.completedAt = nil
         state.started = ProcessInfo.processInfo.systemUptime
         state.samples = [(state.started, 0)]
     }
@@ -83,6 +91,7 @@ final class TransferProgress: Identifiable, @unchecked Sendable {
             state.samples.append((now, state.bytes))
         }
         state.phase = error.map { .failed($0.localizedDescription) } ?? .complete
+        state.completedAt = error == nil ? now : nil
     }
 
     func snapshot() -> Snapshot {
