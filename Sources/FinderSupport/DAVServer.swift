@@ -35,6 +35,7 @@ public final class DAVServer: @unchecked Sendable {
                         if pending { pending = false; continuation.resume(throwing: error) }
                         self.listener.cancel()
                     case .cancelled:
+                        self.listener.stateUpdateHandler = nil
                         if pending { pending = false; continuation.resume(throwing: CancellationError()) }
                     default: break
                     }
@@ -55,7 +56,7 @@ public final class DAVServer: @unchecked Sendable {
     }
     public func stop() {
         queue.async {
-            self.stopped = true; self.listener.cancel()
+            self.stopped = true; self.listener.newConnectionHandler = nil; self.listener.cancel()
             let active = Array(self.sessions.values)
             active.forEach { $0.close() }; self.sessions.removeAll()
         }

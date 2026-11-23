@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import FinderSupport
 import XCTest
 @testable import MacMTP
@@ -63,9 +64,9 @@ final class FinderMountTests: XCTestCase {
     func testPathSecurityAndRanges() async throws {
         let service = DAVService(backend: TestPhone(try workspace()), authority: "127.0.0.1:123", token: "secret", writable: false)
         for path in ["/secret/MacMTP/../outside", "/secret/MacMTP/%2e%2e/outside", "/secret/MacMTP/a%2fb", "/wrong/MacMTP/", "/secret/MacMTP/a//b", "/secret/MacMTP/%00"] {
-            do { _ = try await service.path(path); XCTFail(path) } catch {}
+            do { _ = try service.path(path); XCTFail(path) } catch {}
         }
-        let path = try await service.path("/secret/MacMTP/Photos/%D7%A9%D7%9C%D7%95%D7%9D%20%26.jpg")
+        let path = try service.path("/secret/MacMTP/Photos/%D7%A9%D7%9C%D7%95%D7%9D%20%26.jpg")
         XCTAssertEqual(path.components, ["Photos", "שלום &.jpg"])
         XCTAssertEqual(try DAVService.byteRange("bytes=2-4", size: 10), 2...4)
         XCTAssertEqual(try DAVService.byteRange("bytes=-3", size: 10), 7...9)
@@ -126,4 +127,35 @@ final class FinderMountTests: XCTestCase {
         try await FinderMountController.command("/sbin/umount", [mount.path])
         XCTAssertFalse(FinderMountController.isMounted(mount))
     }
+    @MainActor
+    func testNativeWritableMountCopiesRenamesAndDeletes() async throws {
+        let root = try workspace()
+        let mount = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: mount, withIntermediateDirectories: false)
+        addTeardownBlock { _ = mount.path.withCString { Darwin.rmdir($0) } }
+        let server = try DAVServer(backend: TestPhone(root), writable: true)
+        let address = try await server.start()
+        defer { server.stop() }
+        try await FinderMountController.command("/sbin/mount_webdav", ["-v", "MacMTP Write Test", "-o", "nosuid,nodev,noexec", address.absoluteString, mount.path])
+        do {
+            try await Task.detached {
+                let file = mount.appendingPathComponent("copied.txt")
+                let payload = Data(repeating: 0x5a, count: 1024 * 1024 + 13)
+                try payload.write(to: file)
+                XCTAssertEqual(try Data(contentsOf: file), payload)
+                let renamed = mount.appendingPathComponent("renamed.txt")
+                try FileManager.default.moveItem(at: file, to: renamed)
+                XCTAssertEqual(try Data(contentsOf: renamed), payload)
+                try FileManager.default.removeItem(at: renamed)
+                let folder = mount.appendingPathComponent("New Folder")
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+                try FileManager.default.removeItem(at: folder)
+            }.value
+        } catch {
+            try? await FinderMountController.command("/sbin/umount", [mount.path]); throw error
+        }
+        try await FinderMountController.command("/sbin/umount", [mount.path])
+        XCTAssertFalse(FinderMountController.isMounted(mount))
+    }
+
 }

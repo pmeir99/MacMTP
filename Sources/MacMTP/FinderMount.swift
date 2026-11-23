@@ -20,15 +20,19 @@ final class FinderMountController: ObservableObject {
     @Published private(set) var location: URL?
     @Published private(set) var message = ""
     @Published private(set) var failure: String?
+    private var canMount: (@MainActor () -> Bool)?
     private var device: Device?
     private var server: DAVServer?
     private var directory: URL?
     private var monitor: Task<Void, Never>?
 
-    func attach(_ device: Device) { if !ownsDevice { self.device = device } }
+    func attach(_ device: Device, canMount: @escaping @MainActor () -> Bool) {
+        if !ownsDevice { self.device = device; self.canMount = canMount }
+    }
     func open() { if let location { NSWorkspace.shared.open(location) } }
     func mount(writable: Bool) async {
         guard !ownsDevice, !changing, let device else { return }
+        guard canMount?() == true else { failure = "Finish the current transfer or connection operation before mounting."; return }
         changing = true; ownsDevice = true; failure = nil; message = "Preparing Finder mount…"
         defer { changing = false }
         do {

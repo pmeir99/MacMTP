@@ -159,7 +159,7 @@ public actor DAVService {
             case .file(let value): item = value
             default: throw DAVError(500, "Invalid file")
             }
-            guard !item.directory else { throw DAVError(405, "Open folders in Finder") }
+            guard !item.directory || r.method == "HEAD" else { throw DAVError(405, "Open folders in Finder") }
             if r.headers["if-none-match"] == item.etag { return DAVResponse(304, headers: ["ETag": item.etag]) }
             var response = DAVResponse(200, headers: ["ETag": item.etag, "Accept-Ranges": "bytes", "Content-Type": "application/octet-stream"])
             response.length = item.size

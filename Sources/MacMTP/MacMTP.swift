@@ -337,7 +337,7 @@ struct Browser: View {
         .onAppear {
             if !automaticallyConnect { fileAreaFocused = true }
             let connectedDevice = device
-            if automaticallyConnect { finderMount.attach(connectedDevice) }
+            if automaticallyConnect { finderMount.attach(connectedDevice, canMount: { !busy && !updater.isInstalling }) }
             updater.prepareForRelaunch = {
                 guard await finderMount.unmount() else { return }
                 await connectedDevice.disconnect()
@@ -637,7 +637,8 @@ struct Browser: View {
             return selection.contains(item.id) ? selected : [item]
         } export: { entry, destination in
             guard let storageID else { throw DeviceError.unavailable }
-            await MainActor.run {
+            try await MainActor.run {
+                guard !finderMount.ownsDevice else { throw DeviceError.interfaceBusy }
                 activeExports += 1
                 busy = true
             }
@@ -698,7 +699,7 @@ struct Browser: View {
             do {
                 while let handle = remaining.popLast() {
                     try Task.checkCancellation()
-                    guard !busy, revision == listingVersion, self.storage == storage else { return }
+                    guard !busy, !finderMount.ownsDevice, revision == listingVersion, self.storage == storage else { return }
                     guard visited.insert(handle).inserted else { continue }
                     let children = try await device.list(storage: storage, parent: handle)
                     for child in children {
