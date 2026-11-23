@@ -26,7 +26,7 @@ struct GeneralSettingsView: View {
                 if let error = mount.failure { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
             }
             Section("Browsing") {
-            Toggle("Show hidden files and folders", isOn: $showHiddenFiles)
+                Toggle("Show hidden files and folders", isOn: $showHiddenFiles)
                 .help("Show dot-prefixed items exposed by the phone in every browsing mode.")
             Text("Shows items whose names begin with a period. This does not change which files Android makes available over USB.")
                 .font(.caption)

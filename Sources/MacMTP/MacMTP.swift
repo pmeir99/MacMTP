@@ -332,6 +332,7 @@ struct Browser: View {
         }
         .onChange(of: finderMount.ownsDevice) { _, mounted in
             previews.suspended = mounted || busy
+            updater.blockedByTransfer = mounted || busy
         }
         .onAppear {
             if !automaticallyConnect { fileAreaFocused = true }
@@ -343,7 +344,7 @@ struct Browser: View {
             }
         }
         .onChange(of: busy, initial: true) { _, value in
-            updater.blockedByTransfer = value
+            updater.blockedByTransfer = value || finderMount.ownsDevice
             previews.suspended = value || finderMount.ownsDevice
         }
         .task {
@@ -825,6 +826,7 @@ struct Browser: View {
     }
 
     private func handleNativeKey(_ event: NSEvent) -> Bool {
+        guard !finderMount.ownsDevice else { return false }
         guard [UInt16(123), 124, 125, 126, 36, 49].contains(event.keyCode) else { return false }
         // FileDrag owns mouse interaction; return keyboard focus to the SwiftUI file area.
         fileAreaFocused = true
@@ -851,7 +853,7 @@ struct Browser: View {
         renameRequest?.cancel()
         guard renaming == nil else { return false }
         guard [123, 124, 125, 126, 36, 49].contains(code) else { return false }
-        guard !busy else { return true }
+        guard !busy, !finderMount.ownsDevice else { return true }
         if code == 49 {
             if previewURL != nil { previewURL = nil }
             else if let item = selected.first { quickLook(item) }

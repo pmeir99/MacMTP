@@ -42,7 +42,7 @@ public final class DAVServer: @unchecked Sendable {
                 self.listener.newConnectionHandler = { connection in
                     guard !self.stopped, let service = self.service, self.sessions.count < 8 else { connection.cancel(); return }
                     do {
-                        let session = try Session(connection: connection, service: service, queue: self.queue) { [weak self] id in self?.sessions.removeValue(forKey: id) }
+                        let session = try Session(connection: connection, service: service, queue: self.queue) { [weak owner = self] id in owner?.sessions.removeValue(forKey: id) }
                         self.sessions[session.id] = session; session.start()
                     } catch { connection.cancel() }
                 }
@@ -83,7 +83,7 @@ public final class DAVServer: @unchecked Sendable {
             try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
             body = workspace.appendingPathComponent("body")
             guard FileManager.default.createFile(atPath: body.path, contents: nil, attributes: [.posixPermissions: 0o600]) else { throw CocoaError(.fileWriteUnknown) }
-            input = try FileHandle(forWritingTo: body); parser = DAVHTTPParser(file: input)
+            input = try FileHandle(forWritingTo: body); parser = DAVHTTPParser(file: input, validateHead: { try service.validateHead($0) })
         }
         func start() {
             connection.stateUpdateHandler = { [weak self] state in

@@ -102,7 +102,7 @@ public actor DAVService {
         catch let error as DAVError { return DAVResponse(error.status, data: Data(error.message.utf8)) }
         catch { return DAVResponse(503, data: Data("The phone is unavailable. Eject, reconnect, and mount again. \(error.localizedDescription)".utf8)) }
     }
-    public func path(_ target: String) throws -> DAVPath {
+    public nonisolated func path(_ target: String) throws -> DAVPath {
         guard !target.contains("?"), !target.contains("#"), target.hasPrefix(prefix + "/") || target == prefix,
               let decoded = String(target.dropFirst(prefix.count)).removingPercentEncoding else { throw DAVError(404, "Not found") }
         // Decode once, and reject encoded separators before splitting into components.
@@ -110,6 +110,11 @@ public actor DAVService {
         guard !lower.contains("%2f"), !lower.contains("%5c") else { throw DAVError(400, "Invalid path") }
         let trimmed = decoded.hasSuffix("/") ? String(decoded.dropLast()) : decoded
         return try DAVPath(trimmed.split(separator: "/", omittingEmptySubsequences: false).dropFirst().map(String.init))
+    }
+    public nonisolated func validateHead(_ head: DAVHTTPParser.Head) throws {
+        guard head.headers["host"] == authority, head.headers["origin"] == nil else { throw DAVError(403, "Local Finder access only") }
+        _ = try path(head.target)
+        if let expect = head.headers["expect"], expect.lowercased() != "100-continue" { throw DAVError(417, "Unsupported expectation") }
     }
     private func href(_ path: DAVPath, directory: Bool) -> String {
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))

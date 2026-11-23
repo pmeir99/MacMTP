@@ -2,7 +2,7 @@ import Foundation
 
 /// Incremental HTTP/1.1 framing. Bodies go directly to disk, never into an unbounded Data.
 public final class DAVHTTPParser {
-    public struct Head {
+    public struct Head: Sendable {
         public let method: String
         public let target: String
         public let headers: [String: String]
@@ -17,8 +17,13 @@ public final class DAVHTTPParser {
     private var chunkTerminator = false
     private var finalChunk = false
     private let file: FileHandle
+    private let validateHead: (Head) throws -> Void
+    private var bodyMaximum: UInt64 = 0
     public let maximum: UInt64
-    public init(file: FileHandle, maximum: UInt64 = UInt64(UInt32.max) - 12) { self.file = file; self.maximum = maximum }
+    public init(file: FileHandle, maximum: UInt64 = UInt64(UInt32.max) - 12,
+                validateHead: @escaping (Head) throws -> Void = { _ in }) {
+        self.file = file; self.maximum = maximum; self.validateHead = validateHead
+    }
     public func feed(_ data: Data) throws {
         guard !complete else { throw DAVError(400, "Pipelining is unsupported") }
         buffer.append(data)
@@ -42,15 +47,18 @@ public final class DAVHTTPParser {
                 headers[key] = value
             }
             guard headers["host"] != nil else { throw DAVError(400, "Missing host") }
+            let parsedHead = Head(method: String(first[0]), target: String(first[1]), headers: headers)
+            try validateHead(parsedHead)
+            bodyMaximum = parsedHead.method == "PUT" ? maximum : min(maximum, 64 * 1024)
             if let encoding = headers["transfer-encoding"] {
                 guard encoding.lowercased() == "chunked", headers["content-length"] == nil else { throw DAVError(400, "Ambiguous framing") }
                 chunked = true
             } else if let length = headers["content-length"] {
                 guard !length.isEmpty, length.utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }), let parsed = UInt64(length) else { throw DAVError(400, "Invalid content length") }
-                guard parsed <= maximum else { throw DAVError(413, "File exceeds MTP size limit") }
+                guard parsed <= bodyMaximum else { throw DAVError(413, "File exceeds MTP size limit") }
                 remaining = parsed
             }
-            head = Head(method: String(first[0]), target: String(first[1]), headers: headers)
+            head = parsedHead
             buffer.removeSubrange(..<range.upperBound)
         }
         if chunked { try consumeChunks() }
@@ -62,7 +70,7 @@ public final class DAVHTTPParser {
         if complete { try file.synchronize() }
     }
     private func append(_ bytes: Data) throws {
-        guard UInt64(bytes.count) <= maximum - count else { throw DAVError(413, "File exceeds MTP size limit") }
+        guard UInt64(bytes.count) <= bodyMaximum - count else { throw DAVError(413, "File exceeds MTP size limit") }
         try file.write(contentsOf: bytes); count += UInt64(bytes.count)
     }
     private func consumeChunks() throws {
@@ -83,7 +91,7 @@ public final class DAVHTTPParser {
                 }
                 guard buffer.distance(from: buffer.startIndex, to: range.lowerBound) <= 128, let line = String(data: buffer.prefix(upTo: range.lowerBound), encoding: .ascii),
                       !line.isEmpty, line.utf8.allSatisfy({ ($0 >= 48 && $0 <= 57) || ($0 >= 65 && $0 <= 70) || ($0 >= 97 && $0 <= 102) }),
-                      let size = UInt64(line, radix: 16), size <= maximum - count else { throw DAVError(413, "Invalid or oversized chunk") }
+                      let size = UInt64(line, radix: 16), size <= bodyMaximum - count else { throw DAVError(413, "Invalid or oversized chunk") }
                 buffer.removeSubrange(..<range.upperBound)
                 if size == 0 { finalChunk = true; continue }
                 chunkRemaining = Int(size)
