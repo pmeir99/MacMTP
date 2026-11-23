@@ -49,11 +49,15 @@ body = """Native Android file transfer for Apple Silicon Macs running macOS 27 o
 
 Download **MacMTP.dmg** for installation, or unzip **MacMTP.zip** and move MacMTP.app into Applications.
 
-Refines browsing and transfer feedback:
-- Internal phone storage appears first, followed by removable cards, with metadata-based SF Symbols.
-- Successful upload and download progress cards disappear one second after completion. Failed transfers remain visible for troubleshooting.
-- Settings > General includes a persistent Show hidden files and folders option, synchronized with the View menu and applied to all four browsing modes.
-- Hidden-file visibility does not expand Android USB permissions. MacMTP requests all file types exposed by the phone's MTP service; protected system files and installed-app extraction are not exposed through standard MTP.
+Adds optional Finder mounting with no macFUSE, ADB, or paid Apple Developer account required:
+- Settings > General > Mount phone in Finder exposes internal shared storage and SD cards through macOS's built-in WebDAV client. The bridge runs privately inside MacMTP and binds only to IPv4 loopback.
+- Mounts default to read-only. Enable Allow changes from Finder before mounting to copy, create, rename, move, and delete files from Finder. Eject before changing the access mode.
+- MacMTP's browser pauses while Finder owns the phone session. Eject in Finder or MacMTP to resume browsing. Quitting first attempts a clean eject and refuses to quit if the mount is busy.
+- Downloads stream through private local staging files; successful completion is withheld until MTP confirms success. Byte-range reads use GetPartialObject when the phone advertises support, with a full-file staging fallback for older devices.
+- File replacements stage the upload first and retain a recoverable original until the new name is published. Error handling covers disconnects, stale sessions, full/read-only storage, locked items, and failed ejection.
+- Native mount/read/write/copy/rename/delete/eject tests run against simulated phone storage on macOS. Replacement rollback and HTTP framing/security tests are included.
+
+Important limits: this exposes only storage Android makes available over MTP, not protected system files. MacMTP must stay running. Some phones do not support cross-folder moves. Replacing existing folders or overwriting a MOVE destination is rejected rather than deleting a destination tree. Files remain subject to the existing approximately 4 GB MTP transfer limit. Physical-phone compatibility and performance still require validation on your device.
 
 Includes the existing USB driver-conflict recovery and updater quit/relaunch fixes.
 

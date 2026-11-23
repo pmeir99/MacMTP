@@ -28,7 +28,7 @@ public struct DAVItem: Sendable {
 
 public enum DAVOperation: Sendable {
     case inspect(DAVPath, children: Bool)
-    case read(DAVPath, to: URL, match: String?)
+    case read(DAVPath, to: URL, match: String?, range: ClosedRange<UInt64>? = nil)
     case put(DAVPath, from: URL, match: String?, absent: Bool)
     case copy(DAVPath, DAVPath, overwrite: Bool)
     case mkdir(DAVPath)
@@ -185,17 +185,20 @@ public actor DAVService {
             if r.headers["if-none-match"] == item.etag || r.headers["if-none-match"] == "*" { return DAVResponse(304, headers: ["ETag": item.etag]) }
             var response = DAVResponse(200, headers: ["ETag": item.etag, "Accept-Ranges": "bytes", "Content-Type": "application/octet-stream"])
             response.length = item.size
+            var requestedRange: ClosedRange<UInt64>?
             if let range = r.headers["range"], r.method == "GET" {
                 let bounds = try Self.byteRange(range, size: item.size)
-                response.status = 206; response.offset = bounds.lowerBound; response.length = bounds.upperBound - bounds.lowerBound + 1
+                requestedRange = bounds
+                response.status = 206; response.offset = 0; response.length = bounds.upperBound - bounds.lowerBound + 1
                 response.headers["Content-Range"] = "bytes \(bounds.lowerBound)-\(bounds.upperBound)/\(item.size)"
             }
             if r.method == "GET" {
                 guard FileManager.default.createFile(atPath: output.path, contents: nil, attributes: [.posixPermissions: 0o600]) else { throw DAVError(507, "Cannot stage this download") }
                 response.file = output
                 let backend = backend
-                if item.size == 0 { _ = try await backend.perform(.read(path, to: output, match: item.etag)) }
-                else { response.download = DAVDownload { _ = try await backend.perform(.read(path, to: output, match: item.etag)) } }
+                let range = requestedRange
+                if item.size == 0 { _ = try await backend.perform(.read(path, to: output, match: item.etag, range: range)) }
+                else { response.download = DAVDownload { _ = try await backend.perform(.read(path, to: output, match: item.etag, range: range)) } }
             }
             return response
         case "PUT":

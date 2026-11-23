@@ -6,8 +6,9 @@ import XCTest
 
 private actor TestPhone: DAVBackend {
     let root: URL
-    init(_ root: URL) { self.root = root }
-    func perform(_ operation: DAVOperation) throws -> DAVResult {
+    let delayed: Bool
+    init(_ root: URL, delayed: Bool = false) { self.root = root; self.delayed = delayed }
+    func perform(_ operation: DAVOperation) async throws -> DAVResult {
         func url(_ path: DAVPath) -> URL { path.components.reduce(root) { $0.appendingPathComponent($1) } }
         func item(_ path: DAVPath) throws -> DAVItem {
             let info = try url(path).resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey])
@@ -20,8 +21,18 @@ private actor TestPhone: DAVBackend {
                 result += try FileManager.default.contentsOfDirectory(atPath: url(path).path).sorted().map { try item(DAVPath(path.components + [$0])) }
             }
             return .items(result)
-        case .read(let path, let target, _):
-            try Data(contentsOf: url(path)).write(to: target); return .file(try item(path))
+        case .read(let path, let target, _, let range):
+            let full = try Data(contentsOf: url(path))
+            let data = range.map { Data(full[Int($0.lowerBound)...Int($0.upperBound)]) } ?? full
+            if delayed {
+                let file = try FileHandle(forWritingTo: target); defer { try? file.close() }
+                let half = data.count / 2
+                try file.write(contentsOf: data.prefix(half))
+                try await Task.sleep(for: .milliseconds(120))
+                if path.name == "broken.txt" { throw DAVError(503, "Simulated USB disconnect") }
+                try file.write(contentsOf: data.suffix(from: half))
+            } else { try data.write(to: target) }
+            return .file(try item(path))
         case .put(let path, let source, _, let absent):
             let exists = FileManager.default.fileExists(atPath: url(path).path)
             if absent && exists { throw DAVError(412, "Exists") }
@@ -45,6 +56,13 @@ final class FinderMountTests: XCTestCase {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
         addTeardownBlock { try? FileManager.default.removeItem(at: url) }
         return url
+    }
+    func testEndedPhoneSessionIsRejectedWithoutReopeningUSB() async throws {
+        let device = Device()
+        do {
+            _ = try await device.finderOperation(.inspect(DAVPath([]), children: true), session: UUID(), storages: [])
+            XCTFail("An ended session must not discover a different phone")
+        } catch let error as DAVError { XCTAssertEqual(error.status, 503) }
     }
     func testInterruptedReplacementPreservesOriginalAndCleansStaging() throws {
         var files: [UInt32: String] = [1: "report.pdf", 2: ".upload"]
@@ -138,9 +156,27 @@ final class FinderMountTests: XCTestCase {
         let unlock = try await request("UNLOCK", "file.txt", headers: ["Lock-Token": token]); XCTAssertEqual(unlock.1.statusCode, 204)
         let delete = try await request("DELETE", "file.txt"); XCTAssertEqual(delete.1.statusCode, 204)
     }
+    func testStreamedReadsWaitForDataAndNeverCompleteAfterUSBFailure() async throws {
+        let root = try workspace()
+        let payload = Data(repeating: 0x7a, count: 1024 * 1024 + 7)
+        try payload.write(to: root.appendingPathComponent("good.txt"))
+        try payload.write(to: root.appendingPathComponent("broken.txt"))
+        let server = try DAVServer(backend: TestPhone(root, delayed: true), writable: false)
+        let address = try await server.start(); defer { server.stop() }
+        let (data, response) = try await URLSession.shared.data(from: address.appendingPathComponent("good.txt"))
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertEqual(data, payload)
+        do {
+            _ = try await URLSession.shared.data(from: address.appendingPathComponent("broken.txt"))
+            XCTFail("A disconnected transfer must not appear complete")
+        } catch { /* Expected incomplete HTTP body; Finder must report a failed copy. */ }
+    }
     @MainActor
     func testNativeMacOSMountReadsAndEjectsWithoutInstalledDrivers() async throws {
-        let root = try workspace(), mount = try workspace()
+        let root = try workspace()
+        let mount = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: mount, withIntermediateDirectories: false)
+        addTeardownBlock { _ = mount.path.withCString { Darwin.rmdir($0) } }
         try Data("Finder mounting works".utf8).write(to: root.appendingPathComponent("proof.txt"))
         let server = try DAVServer(backend: TestPhone(root), writable: false)
         let address = try await server.start()
@@ -149,8 +185,7 @@ final class FinderMountTests: XCTestCase {
         do {
             XCTAssertTrue(FinderMountController.isMounted(mount))
             // File APIs can synchronously block waiting for the server; don't block MainActor.
-            let data = try await Task.detached { try Data(contentsOf: mount.appendingPathComponent("proof.txt")) }.value
-            XCTAssertEqual(data, Data("Finder mounting works".utf8))
+            try await FinderMountController.command("/usr/bin/cmp", [root.appendingPathComponent("proof.txt").path, mount.appendingPathComponent("proof.txt").path])
         } catch {
             try? await FinderMountController.command("/sbin/umount", [mount.path]); throw error
         }
@@ -176,6 +211,10 @@ final class FinderMountTests: XCTestCase {
                 let renamed = mount.appendingPathComponent("renamed.txt")
                 try FileManager.default.moveItem(at: file, to: renamed)
                 XCTAssertEqual(try Data(contentsOf: renamed), payload)
+                let duplicate = mount.appendingPathComponent("duplicate.txt")
+                try FileManager.default.copyItem(at: renamed, to: duplicate)
+                XCTAssertEqual(try Data(contentsOf: duplicate), payload)
+                try FileManager.default.removeItem(at: duplicate)
                 try FileManager.default.removeItem(at: renamed)
                 let folder = mount.appendingPathComponent("New Folder")
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)

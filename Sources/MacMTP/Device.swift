@@ -161,6 +161,7 @@ enum ObjectMetadata {
 actor Device {
     private(set) var sessionIdentifier = UUID()
     private var connection: OpaquePointer?
+    private var supportedOperations: Set<UInt16> = []
     private var sequence: UInt32 = 0
     private var cachedDirectories: [String: (date: Date, entries: [Entry])] = [:]
     private var received = Data()
@@ -190,6 +191,7 @@ actor Device {
         mac_usb_close(connection)
         connection = nil
         received.removeAll()
+        supportedOperations.removeAll()
         cachedDirectories.removeAll()
     }
 
@@ -214,6 +216,10 @@ actor Device {
                 let extensions = try info.string()
                 guard extensionID == 6 || extensions.localizedCaseInsensitiveContains("MTP") else {
                     throw DeviceError.unavailable
+                }
+                _ = try? info.take(UInt16.self) // Functional mode.
+                if let count = try? info.take(UInt32.self), count <= 65_536 {
+                    supportedOperations = Set((0..<count).compactMap { _ in try? info.take(UInt16.self) })
                 }
                 sequence = 0
                 _ = try exchange(0x1002, [1])
@@ -307,6 +313,7 @@ actor Device {
     }
 
     func upload(_ url: URL, storage: UInt32, parent: UInt32, progress: @Sendable (TransferEvent) -> Void) throws {
+        try Task.checkCancellation()
         let attributes = try url.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
         guard attributes.isSymbolicLink != true else { throw DeviceError.unsafeName }
         if attributes.isDirectory == true {
@@ -343,6 +350,7 @@ actor Device {
 
     func download(_ entry: Entry, storage: UInt32, into folder: URL,
                   filename: String? = nil, progress: @Sendable (TransferEvent) -> Void) throws {
+        try Task.checkCancellation()
         try validate(entry.name)
         let name = filename ?? entry.name
         try validate(name)
@@ -508,8 +516,11 @@ extension Device {
     func finderOperation(_ operation: DAVOperation, session: UUID, storages: [Storage]) throws -> DAVResult {
         guard connection != nil, sessionIdentifier == session else { throw DAVError(503, "This phone session ended. Eject and mount again.") }
         try Task.checkCancellation()
-        // Never resolve a write through stale directory handles.
-        cachedDirectories.removeAll()
+        // Reuse directory metadata for browsing, but never resolve a write through stale handles.
+        switch operation {
+        case .inspect, .read: break
+        default: cachedDirectories.removeAll()
+        }
         func storageName(_ storage: Storage) -> String {
             let clean = storage.name.replacingOccurrences(of: "/", with: "∕").replacingOccurrences(of: "\\", with: "∖")
             return "\(clean) [\(String(storage.id, radix: 16))]"
@@ -555,14 +566,44 @@ extension Device {
                 items += try list(storage: storage.id, parent: entry?.id ?? .max).map { try item(DAVPath(path.components + [$0.name]), $0) }
             }
             return .items(items)
-        case .read(let path, let output, let match):
-            let (_, entry) = try resolve(path)
-            guard let entry, !entry.folder else { throw DAVError(405, "Not a file") }
-            try check(entry, path: path, match: match)
+        case .read(let path, let output, let match, let range):
+            let (_, cached) = try resolve(path)
+            guard let cached, !cached.folder else { throw DAVError(405, "Not a file") }
+            let entry = try ObjectMetadata.decode(exchange(0x1008, [cached.id]).0, handle: cached.id, timestamp: timestamp)
+            guard entry.name == path.name, !entry.folder else { cachedDirectories.removeAll(); throw DAVError(412, "The item changed. Refresh Finder.") }
+            do { try check(entry, path: path, match: match) }
+            catch { cachedDirectories.removeAll(); throw error }
+            if let range { guard range.upperBound < UInt64(entry.size) else { throw DAVError(416, "Invalid range") } }
             let file = try FileHandle(forWritingTo: output)
             defer { try? file.close() }
-            _ = try exchange(0x1009, [entry.id], download: file)
-            guard try file.offset() == UInt64(entry.size) else { throw DeviceError.malformed }
+            if let range, supportedOperations.contains(0x101B) {
+                var position = range.lowerBound
+                while position <= range.upperBound {
+                    try Task.checkCancellation()
+                    let length = min(UInt64(block), range.upperBound - position + 1)
+                    let data = try exchange(0x101B, [entry.id, UInt32(position), UInt32(length)]).0
+                    guard data.count == Int(length) else { throw DeviceError.malformed }
+                    try file.write(contentsOf: data); position += length
+                }
+            } else if let range {
+                // Older phones without partial reads remain compatible, at the cost of staging the full file.
+                let full = output.deletingLastPathComponent().appendingPathComponent("full-\(UUID().uuidString)")
+                guard FileManager.default.createFile(atPath: full.path, contents: nil, attributes: [.posixPermissions: 0o600]) else { throw CocoaError(.fileWriteUnknown) }
+                defer { try? FileManager.default.removeItem(at: full) }
+                let writer = try FileHandle(forWritingTo: full); defer { try? writer.close() }
+                _ = try exchange(0x1009, [entry.id], download: writer)
+                guard try writer.offset() == UInt64(entry.size) else { throw DeviceError.malformed }
+                let reader = try FileHandle(forReadingFrom: full); defer { try? reader.close() }
+                try reader.seek(toOffset: range.lowerBound)
+                var remaining = range.upperBound - range.lowerBound + 1
+                while remaining > 0 {
+                    guard let data = try reader.read(upToCount: Int(min(UInt64(block), remaining))), !data.isEmpty else { throw DeviceError.malformed }
+                    try file.write(contentsOf: data); remaining -= UInt64(data.count)
+                }
+            } else {
+                _ = try exchange(0x1009, [entry.id], download: file)
+                guard try file.offset() == UInt64(entry.size) else { throw DeviceError.malformed }
+            }
             try file.synchronize()
             return .file(item(path, entry))
         case .mkdir(let path):
