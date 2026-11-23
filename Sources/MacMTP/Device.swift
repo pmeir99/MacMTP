@@ -4,6 +4,35 @@ import USB
 struct Storage: Identifiable, Sendable {
     let id: UInt32
     let name: String
+    var kind: Kind = .unknown
+
+    enum Kind: Equatable, Sendable {
+        case internalStorage, removable, unknown
+
+        init(storageType: UInt16) {
+            switch storageType {
+            case 0x0001, 0x0003: self = .internalStorage
+            case 0x0002, 0x0004: self = .removable
+            default: self = .unknown
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .internalStorage: "internaldrive"
+            case .removable: "sdcard"
+            case .unknown: "externaldrive"
+            }
+        }
+
+        var description: String {
+            switch self {
+            case .internalStorage: "Internal storage"
+            case .removable: "Removable storage"
+            case .unknown: "Device storage"
+            }
+        }
+    }
 }
 
 struct Entry: Identifiable, Sendable {
@@ -86,6 +115,19 @@ private struct Reader {
         let count = Int(try take(UInt32.self))
         guard count <= (data.count - offset) / 4 else { throw DeviceError.malformed }
         return try (0..<count).map { _ in try take() }
+    }
+}
+
+/// StorageInfo reports fixed/removable media independently of a user-editable name.
+enum StorageMetadata {
+    static func decode(_ data: Data, id: UInt32) throws -> Storage {
+        var info = Reader(data: data)
+        let kind = Storage.Kind(storageType: try info.take(UInt16.self))
+        info.offset = 26
+        let description = try info.string()
+        let volume = (try? info.string()) ?? ""
+        let name = description.isEmpty ? (volume.isEmpty ? kind.description : volume) : description
+        return Storage(id: id, name: name, kind: kind)
     }
 }
 
@@ -172,9 +214,7 @@ actor Device {
         }
         var list = Reader(data: try exchange(0x1004).0)
         return try list.handles().map { id in
-            var info = Reader(data: try exchange(0x1005, [id]).0, offset: 26)
-            let label = try info.string()
-            return Storage(id: id, name: label.isEmpty ? "Device Storage" : label)
+            try StorageMetadata.decode(exchange(0x1005, [id]).0, id: id)
         }
     }
 

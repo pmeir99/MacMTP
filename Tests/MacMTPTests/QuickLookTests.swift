@@ -14,7 +14,9 @@ final class QuickLookTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: file) }
         let entry = Entry(id: 1, name: file.lastPathComponent, folder: false, size: 28, modified: nil)
         var selection = Set<UInt32>()
-        let browser = Browser(testEntries: [entry], previewFile: file, layout: "List") { selection = $0 }
+        var transferCounts: [Int] = []
+        let browser = Browser(testEntries: [entry], previewFile: file,
+                              transferCountObserver: { transferCounts.append($0) }, layout: "List") { selection = $0 }
             .environmentObject(AppUpdater())
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 850, height: 600),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
@@ -39,5 +41,7 @@ final class QuickLookTests: XCTestCase {
         }
         XCTAssertTrue(QLPreviewPanel.shared()?.isVisible == true)
         XCTAssertEqual(QLPreviewPanel.shared()?.currentPreviewItem?.previewItemURL, file)
+        XCTAssertFalse(transferCounts.isEmpty)
+        XCTAssertTrue(transferCounts.allSatisfy { $0 == 0 }, "Preparing Quick Look must not add an upload/download progress card.")
     }
 }

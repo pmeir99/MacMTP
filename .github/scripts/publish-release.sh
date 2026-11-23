@@ -49,19 +49,17 @@ body = """Native Android file transfer for Apple Silicon Macs running macOS 27 o
 
 Download **MacMTP.dmg** for installation, or unzip **MacMTP.zip** and move MacMTP.app into Applications.
 
-Adds targeted recovery for an MTP interface blocked by an active macOS driver.
+Refines storage icons and Quick Look presentation:
+- Internal/shared storage uses the internal-drive SF Symbol; removable storage uses the SD-card SF Symbol.
+- Classification uses the device’s MTP StorageType metadata. Unknown storage types retain a generic drive icon, and storage names are preserved.
+- Removes the Quick Look button from the file preview pane. Space continues to open native Quick Look.
+- Preparing a Quick Look preview no longer creates a transfer-progress card. Upload and download progress remains unchanged.
 
-When diagnostics confirm interface-claim denial with an active driver, the connection screen offers **Reset Phone USB**. This matches the USB vendor/product, bus, device address, and interface before resetting. It then immediately retries the MTP interface, with at most two reset attempts per button press.
-
-Resetting briefly interrupts USB activity on that phone, including transfers, debugging, or tethering. It never resets other USB devices, runs during automatic polling, or kills system-wide camera services. If the reset requires re-enumeration, the old handle is closed and normal discovery resumes.
-
-Connection details now include the USB location and reset results. A failed reset is retained in subsequent diagnostic reports.
-
-Includes all browsing, connection recovery, and updater fixes from previous versions. A specific phone’s recovery still depends on macOS and device behavior; hardware validation is necessary to confirm that a driver releases the interface on that device.
+Includes the existing USB driver-conflict recovery and updater quit/relaunch fixes.
 
 Recursive folder sizes are available under View > Calculate Folder Sizes. This is optional because scanning large trees can delay USB operations. The app does not scan the entire phone on connection.
 
-Thumbnail availability depends on the device and file format. Large videos without a device thumbnail retain a file symbol while browsing; Quick Look downloads the selected file with progress. Quick Look supports the formats available in macOS and installed preview extensions.
+Thumbnail availability depends on the device and file format. Large videos without a device thumbnail retain a file symbol while browsing; Quick Look prepares a local copy of the selected file without adding a transfer-progress card. Quick Look supports the formats available in macOS and installed preview extensions.
 
 Software Update includes automatic release checks, verified downloads, Install & Relaunch, and rollback if the updated app cannot reopen.
 

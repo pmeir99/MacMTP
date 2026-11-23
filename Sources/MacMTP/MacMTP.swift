@@ -37,6 +37,7 @@ struct Browser: View {
     private let selectionObserver: ((Set<UInt32>) -> Void)?
     #if DEBUG
     private let testPreviewFile: URL?
+    private let transferCountObserver: ((Int) -> Void)?
     #endif
 
     init() {
@@ -44,14 +45,17 @@ struct Browser: View {
         selectionObserver = nil
         #if DEBUG
         testPreviewFile = nil
+        transferCountObserver = nil
         #endif
     }
 
     #if DEBUG
-    init(testEntries: [Entry], directories: [UInt32: [Entry]] = [:], previewFile: URL? = nil, layout name: String,
+    init(testEntries: [Entry], directories: [UInt32: [Entry]] = [:], previewFile: URL? = nil,
+         transferCountObserver: ((Int) -> Void)? = nil, layout name: String,
          selectionObserver: @escaping (Set<UInt32>) -> Void) {
         automaticallyConnect = false
         testPreviewFile = previewFile
+        self.transferCountObserver = transferCountObserver
         self.selectionObserver = selectionObserver
         _storages = State(initialValue: [Storage(id: 1, name: "Test Storage")])
         _storage = State(initialValue: 1)
@@ -166,7 +170,10 @@ struct Browser: View {
             List(selection: $storage) {
                 Section("Device Storage") {
                     ForEach(storages) { item in
-                        Label(item.name, systemImage: "externaldrive").tag(item.id)
+                        Label(item.name, systemImage: item.kind.symbol)
+                            .help(item.kind.description)
+                            .accessibilityLabel("\(item.name), \(item.kind.description)")
+                            .tag(item.id)
                     }
                 }
             }
@@ -330,6 +337,9 @@ struct Browser: View {
             if calculateFolderSizes && !busy { await measureFolders() }
         }
         .quickLookPreview($previewURL)
+        #if DEBUG
+        .onChange(of: transfers.count, initial: true) { _, count in transferCountObserver?(count) }
+        #endif
         .onChange(of: selection) { _, ids in
             selectionObserver?(ids)
             if ids.count == 1 { keyboardAnchor = ids.first }
@@ -714,9 +724,6 @@ struct Browser: View {
                 if let modified = item.modified {
                     LabeledContent("Modified", value: modified.formatted(date: .abbreviated, time: .shortened))
                 }
-                if !item.folder {
-                    Button("Quick Look", systemImage: "eye") { quickLook(item) }.disabled(busy)
-                }
             }.padding(16)
         }
     }
@@ -767,21 +774,14 @@ struct Browser: View {
 
     private func quickLook(_ item: Entry) {
         guard !busy, !item.folder, let storage else { return }
-        #if DEBUG
-        if let testPreviewFile { previewURL = testPreviewFile; return }
-        #endif
         if let cached = previews.cachedFile(item, storage: storage) { previewURL = cached; return }
         previewURL = nil
         run {
-            let transfer = addTransfer("Preparing Quick Look")
-            transfer.begin(TransferSize(bytes: UInt64(item.size), files: 1))
-            do {
-                previewURL = try await previews.localFile(item, storage: storage, device: device) { transfer.update($0) }
-                transfer.finish()
-            } catch {
-                transfer.finish(error: error)
-                throw error
-            }
+            #if DEBUG
+            if let testPreviewFile { previewURL = testPreviewFile; return }
+            #endif
+            // Quick Look fetches a private preview copy, not a user-requested download.
+            previewURL = try await previews.localFile(item, storage: storage, device: device) { _ in }
         }
     }
 
