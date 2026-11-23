@@ -1,5 +1,6 @@
 import Foundation
 import USB
+import FinderSupport
 
 struct Storage: Identifiable, Sendable {
     let id: UInt32
@@ -497,6 +498,129 @@ actor Device {
         } catch {
             reset()
             throw error
+        }
+    }
+}
+
+// Finder and the browser share this actor: a complete mount operation owns the
+// USB transaction stream, including validation and safe replacement steps.
+extension Device {
+    func finderOperation(_ operation: DAVOperation, session: UUID, storages: [Storage]) throws -> DAVResult {
+        guard connection != nil, sessionIdentifier == session else { throw DAVError(503, "This phone session ended. Eject and mount again.") }
+        try Task.checkCancellation()
+        // Never resolve a write through stale directory handles.
+        cachedDirectories.removeAll()
+        func storageName(_ storage: Storage) -> String {
+            let clean = storage.name.replacingOccurrences(of: "/", with: "∕").replacingOccurrences(of: "\\", with: "∖")
+            return "\(clean) [\(String(storage.id, radix: 16))]"
+        }
+        func item(_ path: DAVPath, _ entry: Entry) -> DAVItem {
+            DAVItem(path: path, directory: entry.folder, size: UInt64(entry.size), modified: entry.modified,
+                    version: "\(session.uuidString)-\(entry.id)-\(entry.size)-\(entry.modified?.timeIntervalSince1970 ?? 0)")
+        }
+        func resolve(_ path: DAVPath) throws -> (Storage, Entry?) {
+            guard let first = path.components.first, let storage = storages.first(where: { storageName($0) == first }) else { throw DAVError(404, "Storage not found") }
+            var parent = UInt32.max
+            var result: Entry?
+            for (index, name) in path.components.dropFirst().enumerated() {
+                guard let found = try list(storage: storage.id, parent: parent).first(where: { $0.name == name }) else { throw DAVError(404, "Item not found") }
+                guard found.folder || index == path.components.count - 2 else { throw DAVError(409, "Parent is not a folder") }
+                result = found; parent = found.id
+            }
+            return (storage, result)
+        }
+        func destination(_ path: DAVPath) throws -> (Storage, UInt32, Entry?) {
+            guard path.components.count >= 2 else { throw DAVError(403, "Storage roots are protected") }
+            let (storage, parent) = try resolve(path.parent)
+            guard parent == nil || parent!.folder else { throw DAVError(409, "Parent is not a folder") }
+            let parentID = parent?.id ?? .max
+            let existing = try list(storage: storage.id, parent: parentID).first(where: { $0.name == path.name })
+            return (storage, parentID, existing)
+        }
+        func check(_ entry: Entry?, path: DAVPath, match: String?) throws {
+            guard let match else { return }
+            guard let entry, match == "*" || match == item(path, entry).etag else { throw DAVError(412, "The file changed. Refresh Finder before trying again.") }
+        }
+        func protect(_ path: DAVPath) throws { guard path.components.count >= 2 else { throw DAVError(403, "Storage roots are protected") } }
+        switch operation {
+        case .inspect(let path, let children):
+            if path.components.isEmpty {
+                var items = [DAVItem(path: path, directory: true, version: session.uuidString)]
+                if children { items += try storages.map { DAVItem(path: try DAVPath([storageName($0)]), directory: true, version: "\(session)-\($0.id)") } }
+                return .items(items)
+            }
+            let (storage, entry) = try resolve(path)
+            var items = [entry.map { item(path, $0) } ?? DAVItem(path: path, directory: true, version: "\(session)-\(storage.id)")]
+            if children && (entry?.folder ?? true) {
+                items += try list(storage: storage.id, parent: entry?.id ?? .max).map { try item(DAVPath(path.components + [$0.name]), $0) }
+            }
+            return .items(items)
+        case .read(let path, let output, let match):
+            let (storage, entry) = try resolve(path)
+            guard let entry, !entry.folder else { throw DAVError(405, "Not a file") }
+            try check(entry, path: path, match: match)
+            // The existing downloader writes a private temporary file and only publishes it on success.
+            try download(entry, storage: storage.id, into: output.deletingLastPathComponent(), filename: output.lastPathComponent) { _ in }
+            return .file(item(path, entry))
+        case .mkdir(let path):
+            let (storage, parent, existing) = try destination(path)
+            guard existing == nil else { throw DAVError(405, "Item already exists") }
+            try makeFolder(path.name, storage: storage.id, parent: parent)
+            return .changed(created: true)
+        case .delete(let path, let match):
+            try protect(path)
+            let (_, entry) = try resolve(path)
+            guard let entry else { throw DAVError(403, "Storage roots are protected") }
+            try check(entry, path: path, match: match); try remove(entry)
+            return .changed(created: false)
+        case .put(let path, let source, let match, let absent):
+            let (storage, parent, existing) = try destination(path)
+            try check(existing, path: path, match: match)
+            if absent && existing != nil { throw DAVError(412, "Item already exists") }
+            guard existing?.folder != true else { throw DAVError(405, "Cannot replace a folder with a file") }
+            let size = try source.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? -1
+            guard size >= 0, size <= Int(UInt32.max) - 12 else { throw DAVError(413, "File exceeds MTP size limit") }
+            let stagingName = ".macmtp-upload-\(UUID().uuidString)"
+            let handle = try create(stagingName, storage: storage.id, parent: parent, size: UInt32(size), folder: false)
+            let staged = Entry(id: handle, name: stagingName, folder: false, size: UInt32(size), modified: nil)
+            var published = false
+            defer { if !published { try? remove(staged) } }
+            let input = try FileHandle(forReadingFrom: source); defer { try? input.close() }
+            _ = try exchange(0x100D, upload: (input, size))
+            try Task.checkCancellation()
+            // Upload first. Keep the original on the phone until the new name is committed.
+            if let existing {
+                let backup = ".macmtp-backup-\(UUID().uuidString)"
+                try rename(existing, to: backup)
+                do { try rename(staged, to: path.name); published = true }
+                catch {
+                    do { try rename(existing, to: path.name) }
+                    catch { throw DAVError(503, "Replacement failed. The original is preserved as \(backup). Reconnect before retrying.") }
+                    throw error
+                }
+                do { try remove(existing) }
+                catch { throw DAVError(503, "The new file was saved, but the original backup \(backup) could not be removed. Refresh before retrying.") }
+            } else { try rename(staged, to: path.name); published = true }
+            return .changed(created: existing == nil)
+        case .move(let path, let target, let overwrite, let match):
+            try protect(path); try protect(target)
+            if path == target { return .changed(created: false) }
+            guard !path.contains(target) else { throw DAVError(409, "Cannot move a folder into itself") }
+            let (sourceStorage, source) = try resolve(path)
+            guard let source else { throw DAVError(403, "Storage roots are protected") }
+            try check(source, path: path, match: match)
+            let (targetStorage, parent, existing) = try destination(target)
+            guard existing == nil || overwrite else { throw DAVError(412, "Destination exists") }
+            // Never recursively destroy a destination tree to satisfy a Finder rename.
+            guard existing == nil else { throw DAVError(409, "Destination exists. Remove or rename it before moving this item.") }
+            guard sourceStorage.id == targetStorage.id else { throw DAVError(501, "Move between storage volumes by copying, then deleting the original") }
+            if path.parent == target.parent { try rename(source, to: target.name) }
+            else {
+                guard path.name == target.name else { throw DAVError(501, "Move the item first, then rename it") }
+                _ = try exchange(0x1019, [source.id, targetStorage.id, parent == .max ? 0 : parent])
+                cachedDirectories.removeAll()
+            }
+            return .changed(created: true)
         }
     }
 }

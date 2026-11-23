@@ -9,6 +9,7 @@ import UniformTypeIdentifiers
 
 @main
 struct MacMTPApp: App {
+    @NSApplicationDelegateAdaptor(MacMTPApplicationDelegate.self) private var appDelegate
     @StateObject private var updater = AppUpdater()
 
     var body: some Scene {
@@ -80,6 +81,7 @@ struct Browser: View {
         case name = "Name", kind = "Kind", size = "Size", modified = "Date Modified"
     }
 
+    @ObservedObject private var finderMount = FinderMountController.shared
     @StateObject private var previews = PreviewStore()
     @State private var previewURL: URL?
     @State private var content = DirectoryContent()
@@ -308,15 +310,41 @@ struct Browser: View {
                 }.help("Sorting, hidden files, inspector, and recent activity")
             }
         }
-        .disabled(updater.isInstalling)
+        .disabled(updater.isInstalling || finderMount.ownsDevice)
+        .overlay {
+            if finderMount.ownsDevice {
+                VStack(spacing: 12) {
+                    Image(systemName: "externaldrive.connected.to.line.below").font(.largeTitle)
+                    Text("Phone mounted in Finder").font(.title2)
+                    Text("Browse and transfer files in Finder. Eject the phone to resume browsing here.")
+                        .foregroundStyle(.secondary)
+                    Button("Open in Finder") { finderMount.open() }
+                    Button("Eject Phone") { Task { await finderMount.unmount() } }
+                        .disabled(finderMount.changing)
+                    if let error = finderMount.failure { Text(error).foregroundStyle(.red).textSelection(.enabled) }
+                }
+                .padding(28).frame(maxWidth: 500)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .macmtpFinderDidUnmount)) { _ in
+            run { await invalidateContent(); try await reconnect() }
+        }
+        .onChange(of: finderMount.ownsDevice) { _, mounted in
+            previews.suspended = mounted || busy
+        }
         .onAppear {
             if !automaticallyConnect { fileAreaFocused = true }
             let connectedDevice = device
-            updater.prepareForRelaunch = { await connectedDevice.disconnect() }
+            if automaticallyConnect { finderMount.attach(connectedDevice) }
+            updater.prepareForRelaunch = {
+                guard await finderMount.unmount() else { return }
+                await connectedDevice.disconnect()
+            }
         }
         .onChange(of: busy, initial: true) { _, value in
             updater.blockedByTransfer = value
-            previews.suspended = value
+            previews.suspended = value || finderMount.ownsDevice
         }
         .task {
             guard automaticallyConnect else { return }
@@ -969,7 +997,7 @@ struct Browser: View {
     }
 
     private func attemptConnection() async {
-        guard !busy, !updater.isInstalling else { return }
+        guard !busy, !updater.isInstalling, !finderMount.ownsDevice else { return }
         busy = true
         defer { busy = activeExports > 0 }
         let previous = storages
@@ -1081,7 +1109,7 @@ struct Browser: View {
     }
 
     private func run(_ operation: @escaping @MainActor () async throws -> Void) {
-        guard !busy else { return }
+        guard !busy, !finderMount.ownsDevice else { return }
         busy = true
         Task { @MainActor in
             defer { busy = activeExports > 0; status = "" }
